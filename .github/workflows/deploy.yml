@@ -15,15 +15,16 @@ jobs:
         env:
           FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-      - name: Secrets einfügen
+     - name: Secrets einfügen
         run: |
+          mkdir -p dist
           sed \
             -e "s|%%FIREBASE_API_KEY%%|${{ secrets.FIREBASE_API_KEY }}|g" \
             -e "s|%%FIREBASE_AUTH_DOMAIN%%|${{ secrets.FIREBASE_AUTH_DOMAIN }}|g" \
             -e "s|%%FIREBASE_PROJECT_ID%%|${{ secrets.FIREBASE_PROJECT_ID }}|g" \
             -e "s|%%FIREBASE_SENDER_ID%%|${{ secrets.FIREBASE_SENDER_ID }}|g" \
             -e "s|%%FIREBASE_APP_ID%%|${{ secrets.FIREBASE_APP_ID }}|g" \
-            index.template.html > index.html
+            index.template.html > dist/index.html
 
       - name: Auf GitHub Pages deployen
         uses: peaceiris/actions-gh-pages@v4
@@ -31,5 +32,5 @@ jobs:
           FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: .
+          publish_dir: ./dist
           publish_branch: gh-pages
