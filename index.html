@@ -8,7 +8,7 @@
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
-import { getAuth, signInAnonymously, onAuthStateChanged } 
+import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } 
   from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
 import { getFirestore, collection, doc, setDoc, updateDoc, deleteDoc, onSnapshot, writeBatch, query, orderBy } 
   from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
@@ -37,14 +37,40 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7
 
 // ── AUTH ───────────────────────────────────────────────────────
 onAuthStateChanged(auth, async user => {
+  const loginScreen = document.getElementById('login-screen');
+  const appContainer = document.getElementById('app');
+  
   if (user) {
+    loginScreen.style.display = 'none';
+    appContainer.style.display = 'grid';
     document.getElementById('fb-dot').className = 'fb-dot online';
     subscribeData();
   } else {
-  document.getElementById('login-screen').style.display = 'flex';
-  document.getElementById('app').style.display = 'none';
-}
+    loginScreen.style.display = 'flex';
+    appContainer.style.display = 'none';
+    document.getElementById('fb-dot').className = 'fb-dot';
+  }
 });
+
+window.handleLogin = async (e) => {
+  e.preventDefault();
+  const user = document.getElementById('login-user').value.trim();
+  const pass = document.getElementById('login-pass').value;
+  const errorEl = document.getElementById('login-error');
+  
+  // Da Firebase E-Mail benötigt, mappen wir den User "Florian" intern
+  if (user.toLowerCase() === "florian") {
+    try {
+      await signInWithEmailAndPassword(auth, "florian@collector.de", pass);
+    } catch (err) {
+      errorEl.textContent = "Passwort falsch.";
+    }
+  } else {
+    errorEl.textContent = "Benutzer nicht gefunden.";
+  }
+};
+
+window.logout = () => signOut(auth);
 
 function subscribeData() {
   onSnapshot(query(collection(db, 'cards'), orderBy('pos', 'asc')), snap => {
@@ -97,7 +123,6 @@ function createCatEl(cat, label, isSub = false, hasChildren = false, isCollapsed
   li.className = (activeCat === cat.name ? 'active ' : '') + (isSub ? 'sub-cat' : '');
   let toggle = hasChildren ? `<span class="toggle-icon" onclick="event.stopPropagation(); toggleCatCollapse('${cat.name}')">${isCollapsed ? '▶' : '▼'}</span>` : '';
   
-  // Lösch-Button nur einfügen, wenn Kategorie nicht "Alle Karten" ist und genau 0 Karten enthält
   let deleteBtn = '';
   if (cat.name !== '' && total === 0) {
     deleteBtn = `<span class="cat-delete" onclick="event.stopPropagation(); removeCategory('${cat.name}')">×</span>`;
@@ -141,7 +166,6 @@ function renderGrid() {
 
   filtered.forEach(c => {
     const div = document.createElement('div');
-    // Wenn "Nur Fehlende" aktiv ist, entfernen wir die Transparenz-Klasse
     const opacityClass = (c.status === 'missing' && !showOnlyMissing) ? 'is-missing' : '';
     div.className = `card-item ${opacityClass} ${selectedCards.has(c.id) ? 'selected' : ''}`;
     div.dataset.id = c.id;
@@ -171,7 +195,6 @@ window.toggleMissingFilter = () => {
 // ── DRAG & DROP LOGIK ─────────────────────────────────────────
 window.addEventListener('dragover', e => e.preventDefault());
 
-// Performance Fix: Skaliert Bilder beim Drop automatisch herunter
 function processImageFile(file) {
   return new Promise((resolve) => {
     const rd = new FileReader();
@@ -179,7 +202,7 @@ function processImageFile(file) {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX = 500; // Maximale Kantenlänge für bessere Performance
+        const MAX = 500;
         let w = img.width, h = img.height;
         if (w > MAX || h > MAX) {
           if (w > h) { h *= MAX / w; w = MAX; }
@@ -188,7 +211,7 @@ function processImageFile(file) {
         canvas.width = w; canvas.height = h;
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL('image/webp', 0.8)); // Speichert platzsparend als WebP
+        resolve(canvas.toDataURL('image/webp', 0.8));
       };
       img.src = ev.target.result;
     };
@@ -197,6 +220,7 @@ function processImageFile(file) {
 }
 
 window.addEventListener('drop', async e => {
+  if (e.target.closest('#login-screen')) return;
   if (e.dataTransfer.getData('card-id')) return;
   e.preventDefault();
   
@@ -207,7 +231,7 @@ window.addEventListener('drop', async e => {
   if (files.length > 0) {
     for (let file of files) {
       if (file.type.startsWith('image/')) {
-        const base64 = await processImageFile(file); // Neues komprimiertes Bild
+        const base64 = await processImageFile(file);
         newUrls.push(base64);
       }
     }
@@ -238,6 +262,7 @@ async function handleSortDrop(e, targetId) {
 
 // ── SELECTION & BULK ──────────────────────────────────────────
 window.addEventListener('mousedown', e => {
+  if (e.target.closest('#login-screen')) return;
   if (e.target.closest('.toolbar, .sidebar, .overlay, .card-item, #bulk-bar')) return;
   isSelecting = true;
   startX = e.pageX; startY = e.pageY;
@@ -341,10 +366,44 @@ body {
     color: var(--text); 
     font-family: 'Crimson Pro', serif; 
     overflow: hidden; 
-    user-select: none; 
 }
 
-#app { display: grid; grid-template-rows: 60px 60px 1fr; height: 100vh; }
+/* LOGIN SCREEN */
+#login-screen {
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+}
+
+.login-card {
+    background: var(--surf);
+    border: 1px solid var(--border);
+    padding: 3rem;
+    border-radius: 20px;
+    width: 380px;
+    text-align: center;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+}
+
+.login-card h1 { font-family: 'Cinzel'; color: var(--gold); margin-bottom: 2rem; font-size: 1.5rem; }
+.login-card input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: white;
+    padding: 12px;
+    margin-bottom: 1rem;
+    border-radius: 8px;
+    outline: none;
+}
+
+#login-error { color: #ff4d4d; font-size: 0.8rem; margin-bottom: 1rem; height: 1rem; }
+
+#app { display: none; grid-template-rows: 60px 60px 1fr; height: 100vh; }
 
 header { 
     background: var(--surf); 
@@ -360,6 +419,17 @@ header {
 
 .fb-dot { width: 10px; height: 10px; border-radius: 50%; background: #333; }
 .fb-dot.online { background: #00ff88; box-shadow: 0 0 10px #00ff88; }
+
+.logout-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 5px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.7rem;
+    font-family: 'Cinzel';
+}
 
 .toolbar { 
     background: #1a1a20; 
@@ -467,13 +537,12 @@ header {
     position: relative; 
     transition: transform 0.2s, box-shadow 0.2s; 
     cursor: grab; 
-    content-visibility: auto; /* Performance Boost: Lädt nur Karten im Sichtbereich */
+    content-visibility: auto;
 }
 
 .card-item:hover { transform: translateY(-5px); box-shadow: 0 10px 20px rgba(0,0,0,0.5); }
 .card-item.selected { border-color: var(--gold); box-shadow: 0 0 15px rgba(241, 211, 130, 0.3); }
 
-/* Standard-Transparenz für fehlende Karten */
 .card-item.is-missing { opacity: 0.25; filter: grayscale(1); }
 
 .card-img-wrap { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; pointer-events: none; }
@@ -553,6 +622,18 @@ header {
 </style>
 </head>
 <body>
+
+<!-- LOGIN SCREEN -->
+<div id="login-screen">
+    <form class="login-card" onsubmit="handleLogin(event)">
+        <h1>Collector Login</h1>
+        <input type="text" id="login-user" placeholder="Benutzername" required>
+        <input type="password" id="login-pass" placeholder="Passwort" required>
+        <div id="login-error"></div>
+        <button type="submit" class="btn-gold" style="width:100%">EINLOGGEN</button>
+    </form>
+</div>
+
 <div id="selection-box"></div>
 
 <div id="bulk-bar">
@@ -566,6 +647,7 @@ header {
   <header>
       <div class="logo">⬡ COLLECTOR ULTIMATE</div>
       <div id="fb-dot" class="fb-dot"></div>
+      <button class="logout-btn" onclick="logout()">LOGOUT</button>
       <div style="margin-left:auto; font-size:0.85rem; font-family:'Cinzel'; color: var(--gold);">
           TOTAL: <b id="stat-total" style="color: #fff;">0</b> | 
           OWNED: <b id="stat-have" style="color:#0f8">0</b>
