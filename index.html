@@ -41,8 +41,9 @@ onAuthStateChanged(auth, async user => {
     document.getElementById('fb-dot').className = 'fb-dot online';
     subscribeData();
   } else {
-    await signInAnonymously(auth).catch(console.error);
-  }
+  document.getElementById('login-screen').style.display = 'flex';
+  document.getElementById('app').style.display = 'none';
+}
 });
 
 function subscribeData() {
