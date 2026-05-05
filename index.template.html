@@ -58,7 +58,6 @@ window.handleLogin = async (e) => {
   const pass = document.getElementById('login-pass').value;
   const errorEl = document.getElementById('login-error');
   
-  // Da Firebase E-Mail benötigt, mappen wir den User "Florian" intern
   if (user.toLowerCase() === "florian") {
     try {
       await signInWithEmailAndPassword(auth, "florian@collector.de", pass);
@@ -73,21 +72,50 @@ window.handleLogin = async (e) => {
 window.logout = () => signOut(auth);
 
 function subscribeData() {
-  onSnapshot(query(collection(db, 'cards'), orderBy('pos', 'asc')), snap => {
-    cards = snap.docs.map(d => ({id:d.id, ...d.data()}));
-    renderAll();
-  });
-  onSnapshot(collection(db, 'categories'), snap => {
-    categories = snap.docs.map(d => d.data());
-    renderAll();
-  });
+  showLoading(true);
+  let cardsReady = false, catsReady = false;
+  const checkReady = () => { if (cardsReady && catsReady) showLoading(false); };
+
+  onSnapshot(
+    query(collection(db, 'cards'), orderBy('pos', 'asc')),
+    snap => {
+      cards = snap.docs.map(d => ({id:d.id, ...d.data()}));
+      cardsReady = true; checkReady(); renderAll();
+    },
+    err => {
+      console.error('Cards snapshot error:', err);
+      onSnapshot(collection(db, 'cards'), snap => {
+        cards = snap.docs.map(d => ({id:d.id, ...d.data()}));
+        cardsReady = true; checkReady(); renderAll();
+      });
+    }
+  );
+
+  onSnapshot(
+    collection(db, 'categories'),
+    snap => {
+      categories = snap.docs.map(d => d.data());
+      catsReady = true; checkReady(); renderAll();
+    },
+    err => { console.error('Categories snapshot error:', err); showLoading(false); }
+  );
 }
 
+function showLoading(on) {
+  let el = document.getElementById('loading-overlay');
+  if (el) el.style.display = on ? 'flex' : 'none';
+}
+
+let _renderTimer = null;
 function renderAll() {
-  renderSidebar();
-  renderGrid();
-  updateStats();
-  renderCatDropdowns();
+  if (_renderTimer) clearTimeout(_renderTimer);
+  _renderTimer = setTimeout(() => {
+    _renderTimer = null;
+    renderSidebar();
+    renderGrid();
+    updateStats();
+    renderCatDropdowns();
+  }, 40);
 }
 
 function updateStats() {
@@ -123,7 +151,6 @@ function createCatEl(cat, label, isSub = false, hasChildren = false, isCollapsed
   const li = document.createElement('li');
   li.className = (activeCat === cat.name ? 'active ' : '') + (isSub ? 'sub-cat' : '');
 
-  // Drag-and-drop für Sortierung (nur echte Kategorien)
   if (cat.name !== '') {
     li.draggable = true;
     li.dataset.catName = cat.name;
@@ -143,7 +170,6 @@ function createCatEl(cat, label, isSub = false, hasChildren = false, isCollapsed
       const draggedCat = categories.find(c => c.name === draggedName);
       const targetCat  = categories.find(c => c.name === cat.name);
       if (!draggedCat || !targetCat) return;
-      // Tausche pos-Werte
       const batch = writeBatch(db);
       batch.update(doc(db, 'categories', draggedName), { pos: targetCat.pos || 0 });
       batch.update(doc(db, 'categories', cat.name),    { pos: draggedCat.pos || 0 });
@@ -151,16 +177,10 @@ function createCatEl(cat, label, isSub = false, hasChildren = false, isCollapsed
     });
   }
 
-  let toggle = hasChildren ? `<span class="toggle-icon" onclick="event.stopPropagation(); toggleCatCollapse('${cat.name}')">${isCollapsed ? '▶' : '▼'}</span>` : '';
-  
+  let toggle = hasChildren ? `<span class="toggle-icon" onclick="event.stopPropagation(); window.toggleCatCollapse('${cat.name}')">${isCollapsed ? '▶' : '▼'}</span>` : '';
   let dragHandle = cat.name !== '' ? `<span class="cat-drag-handle" title="Sortieren">⠿</span>` : '';
-
-  let renameBtn = cat.name !== '' ? `<span class="cat-rename" onclick="event.stopPropagation(); renameCategory('${cat.name}')" title="Umbenennen">✏️</span>` : '';
-
-  let deleteBtn = '';
-  if (cat.name !== '' && total === 0) {
-    deleteBtn = `<span class="cat-delete" onclick="event.stopPropagation(); removeCategory('${cat.name}')">×</span>`;
-  }
+  let renameBtn = cat.name !== '' ? `<span class="cat-rename" onclick="event.stopPropagation(); window.renameCategory('${cat.name}')" title="Umbenennen">✏️</span>` : '';
+  let deleteBtn = (cat.name !== '' && total === 0) ? `<span class="cat-delete" onclick="event.stopPropagation(); window.removeCategory('${cat.name}')">×</span>` : '';
 
   li.onclick = () => { activeCat = cat.name; renderGrid(); renderSidebar(); };
   
@@ -185,7 +205,6 @@ window.removeCategory = async (name) => {
   if (!confirm(`Kategorie "${name}" wirklich löschen?`)) return;
   await deleteDoc(doc(db, 'categories', name));
   if (activeCat === name) activeCat = '';
-  renderAll();
 };
 
 window.renameCategory = async (oldName) => {
@@ -196,20 +215,10 @@ window.renameCategory = async (oldName) => {
 
   const oldCat = categories.find(c => c.name === oldName);
   const batch = writeBatch(db);
-
-  // Neue Kategorie anlegen
   batch.set(doc(db, 'categories', trimmed), { ...oldCat, name: trimmed });
-  // Alte löschen
   batch.delete(doc(db, 'categories', oldName));
-  // Alle Karten mit dieser Kategorie updaten
-  cards.filter(c => c.cat === oldName).forEach(c => {
-    batch.update(doc(db, 'cards', c.id), { cat: trimmed });
-  });
-  // Alle Unterkategorien updaten
-  categories.filter(c => c.parent === oldName).forEach(c => {
-    batch.update(doc(db, 'categories', c.name), { parent: trimmed });
-  });
-
+  cards.filter(c => c.cat === oldName).forEach(c => batch.update(doc(db, 'cards', c.id), { cat: trimmed }));
+  categories.filter(c => c.parent === oldName).forEach(c => batch.update(doc(db, 'categories', c.name), { parent: trimmed }));
   await batch.commit();
   if (activeCat === oldName) activeCat = trimmed;
 };
@@ -219,11 +228,12 @@ function renderGrid() {
   const grid = document.getElementById('card-grid');
   grid.innerHTML = '';
   
+  const search = document.getElementById('search-input').value.toLowerCase();
   const filtered = cards.filter(c => {
     const matchesCat = !activeCat || c.cat === activeCat || (categories.find(x=>x.name===c.cat)?.parent === activeCat);
     const matchesMissing = !showOnlyMissing || c.status === 'missing';
-    const search = document.getElementById('search-input').value.toLowerCase();
-    return matchesCat && matchesMissing && (!search || c.name?.toLowerCase().includes(search));
+    const matchesSearch = !search || (c.name && c.name.toLowerCase().includes(search));
+    return matchesCat && matchesMissing && matchesSearch;
   });
 
   filtered.forEach(c => {
@@ -233,29 +243,40 @@ function renderGrid() {
     div.dataset.id = c.id;
     div.draggable = true;
     div.innerHTML = `
-      <div class="card-img-wrap">${c.image ? `<img src="${c.image}" loading="lazy" decoding="async">` : '<span>🃏</span>'}</div>
+      <div class="card-img-wrap">${c.image
+        ? `<img data-src="${c.image}" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E" loading="lazy" class="lazy-img">`
+        : '<span>🃏</span>'}</div>
       ${c.status === 'missing' ? '<div class="badge">FEHLT</div>' : ''}
       <div class="card-info">${c.name || ''}</div>
     `;
-    div.ondblclick = () => {
-      if (div._clickTimer) { clearTimeout(div._clickTimer); div._clickTimer = null; }
-      openEditModal(c);
-    };
-    div.onclick = () => {
-      if (div._clickTimer) { clearTimeout(div._clickTimer); div._clickTimer = null; }
-      div._clickTimer = setTimeout(() => {
-        div._clickTimer = null;
+    div.ondblclick = () => window.openEditModal(c);
+    div.onclick = (e) => {
         if (selectedCards.has(c.id)) selectedCards.delete(c.id);
         else selectedCards.add(c.id);
-        updateBulkUI(); renderGrid();
-      }, 220);
+        updateBulkUI();
+        div.classList.toggle('selected');
     };
     div.ondragstart = (e) => { e.dataTransfer.setData('card-id', c.id); div.classList.add('dragging'); };
     div.ondragend = () => div.classList.remove('dragging');
     div.ondragover = (e) => e.preventDefault();
-    div.ondrop = (e) => handleSortDrop(e, c.id);
+    div.ondrop = (e) => { e.stopPropagation(); handleSortDrop(e, c.id); };
     grid.appendChild(div);
   });
+  initLazyImages();
+}
+
+function initLazyImages() {
+  const observer = new IntersectionObserver((entries, obs) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const img = entry.target;
+        img.src = img.dataset.src;
+        img.classList.remove('lazy-img');
+        obs.unobserve(img);
+      }
+    });
+  }, { rootMargin: '100px' });
+  document.querySelectorAll('img.lazy-img').forEach(img => observer.observe(img));
 }
 
 window.toggleMissingFilter = () => {
@@ -266,17 +287,15 @@ window.toggleMissingFilter = () => {
   renderGrid();
 };
 
-// ── DRAG & DROP LOGIK ─────────────────────────────────────────
-window.addEventListener('dragover', e => e.preventDefault());
-
-function processImageFile(file) {
+// ── DRAG & DROP LOGIK (BILDER) ─────────────────────────────────
+async function processImageFile(file) {
   return new Promise((resolve) => {
     const rd = new FileReader();
     rd.onload = ev => {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX = 500;
+        const MAX = 400;
         let w = img.width, h = img.height;
         if (w > MAX || h > MAX) {
           if (w > h) { h *= MAX / w; w = MAX; }
@@ -285,7 +304,7 @@ function processImageFile(file) {
         canvas.width = w; canvas.height = h;
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL('image/webp', 0.8));
+        resolve(canvas.toDataURL('image/webp', 0.65));
       };
       img.src = ev.target.result;
     };
@@ -293,9 +312,11 @@ function processImageFile(file) {
   });
 }
 
+window.addEventListener('dragover', e => e.preventDefault());
 window.addEventListener('drop', async e => {
+  // Verhindere Bild-Logik, wenn wir Karten oder Kategorien sortieren
+  if (e.dataTransfer.getData('card-id') || e.dataTransfer.getData('cat-drag')) return;
   if (e.target.closest('#login-screen')) return;
-  if (e.dataTransfer.getData('card-id')) return;
   e.preventDefault();
   
   const files = Array.from(e.dataTransfer.files);
@@ -312,8 +333,7 @@ window.addEventListener('drop', async e => {
   } else if (html) {
     const parser = new DOMParser();
     const docParsed = parser.parseFromString(html, "text/html");
-    const imgs = Array.from(docParsed.querySelectorAll('img'));
-    newUrls = imgs.map(img => img.src).filter(src => src);
+    newUrls = Array.from(docParsed.querySelectorAll('img')).map(img => img.src).filter(src => src);
   }
 
   if (newUrls.length > 0) {
@@ -327,7 +347,6 @@ window.addEventListener('drop', async e => {
 });
 
 async function handleSortDrop(e, targetId) {
-  e.preventDefault();
   const draggedId = e.dataTransfer.getData('card-id');
   if (!draggedId || draggedId === targetId) return;
   const tIdx = cards.findIndex(c => c.id === targetId);
@@ -336,14 +355,13 @@ async function handleSortDrop(e, targetId) {
 
 // ── SELECTION & BULK ──────────────────────────────────────────
 window.addEventListener('mousedown', e => {
-  if (e.target.closest('#login-screen')) return;
-  if (e.target.closest('.toolbar, .sidebar, .overlay, .card-item, #bulk-bar')) return;
+  if (e.target.closest('#login-screen') || e.target.closest('.toolbar, .sidebar, .overlay, .card-item, #bulk-bar')) return;
   isSelecting = true;
   startX = e.pageX; startY = e.pageY;
   selectedCards.clear();
   const sb = document.getElementById('selection-box');
   sb.style.display = 'block'; sb.style.width = '0px'; sb.style.height = '0px';
-  updateBulkUI(); renderGrid();
+  renderGrid();
 });
 
 window.addEventListener('mousemove', e => {
@@ -352,16 +370,28 @@ window.addEventListener('mousemove', e => {
   const x = Math.min(e.pageX, startX), y = Math.min(e.pageY, startY);
   const w = Math.abs(e.pageX - startX), h = Math.abs(e.pageY - startY);
   sb.style.left = x+'px'; sb.style.top = y+'px'; sb.style.width = w+'px'; sb.style.height = h+'px';
+  
   const rect = sb.getBoundingClientRect();
   document.querySelectorAll('.card-item').forEach(el => {
     const r = el.getBoundingClientRect();
     const isOver = !(r.right < rect.left || r.left > rect.right || r.bottom < rect.top || r.top > rect.bottom);
-    if(isOver) selectedCards.add(el.dataset.id); else selectedCards.delete(el.dataset.id);
+    if(isOver) {
+        selectedCards.add(el.dataset.id);
+        el.classList.add('selected');
+    } else {
+        selectedCards.delete(el.dataset.id);
+        el.classList.remove('selected');
+    }
   });
   updateBulkUI();
 });
 
-window.addEventListener('mouseup', () => { if(isSelecting) { isSelecting = false; document.getElementById('selection-box').style.display = 'none'; renderGrid(); } });
+window.addEventListener('mouseup', () => { 
+  if(isSelecting) { 
+    isSelecting = false; 
+    document.getElementById('selection-box').style.display = 'none'; 
+  } 
+});
 
 function updateBulkUI() {
   const bar = document.getElementById('bulk-bar');
@@ -375,7 +405,7 @@ window.bulkStatus = async (status) => {
   const batch = writeBatch(db);
   selectedCards.forEach(id => batch.update(doc(db, 'cards', id), { status }));
   await batch.commit();
-  selectedCards.clear(); updateBulkUI(); renderGrid();
+  selectedCards.clear(); updateBulkUI();
 };
 
 window.bulkDelete = async () => {
@@ -383,7 +413,7 @@ window.bulkDelete = async () => {
   const batch = writeBatch(db);
   selectedCards.forEach(id => batch.delete(doc(db, 'cards', id)));
   await batch.commit();
-  selectedCards.clear(); updateBulkUI(); renderGrid();
+  selectedCards.clear(); updateBulkUI();
 };
 
 // ── MODAL & KATEGORIEN ─────────────────────────────────────────
@@ -411,8 +441,10 @@ window.openEditModal = (card) => {
 
 window.saveCard = async () => {
   await updateDoc(doc(db, 'cards', editingId), {
-    name: document.getElementById('f-name').value, set: document.getElementById('f-set').value,
-    cat: document.getElementById('f-cat').value, status: document.getElementById('f-status').value
+    name: document.getElementById('f-name').value, 
+    set: document.getElementById('f-set').value,
+    cat: document.getElementById('f-cat').value, 
+    status: document.getElementById('f-status').value
   });
   document.getElementById('modal-overlay').classList.remove('open');
 };
@@ -442,7 +474,6 @@ body {
     overflow: hidden; 
 }
 
-/* LOGIN SCREEN */
 #login-screen {
     position: fixed;
     inset: 0;
@@ -566,7 +597,6 @@ header {
     display: flex; 
     flex-direction: column;
     gap: 4px;
-    transition: border-color 0.3s;
 }
 
 .cat-list li.active { border-color: var(--gold); background: rgba(241, 211, 130, 0.05); }
@@ -584,7 +614,6 @@ header {
     transition: 0.2s;
 }
 .cat-list li:hover .cat-delete { opacity: 1; }
-.cat-delete:hover { transform: translateY(-50%) scale(1.2); }
 
 .cat-rename {
     position: absolute;
@@ -597,7 +626,6 @@ header {
     cursor: pointer;
 }
 .cat-list li:hover .cat-rename { opacity: 0.7; }
-.cat-rename:hover { opacity: 1 !important; }
 
 .cat-drag-handle {
     position: absolute;
@@ -607,13 +635,10 @@ header {
     font-size: 1rem;
     color: var(--gold);
     opacity: 0;
-    transition: opacity 0.2s;
     cursor: grab;
     z-index: 10;
-    line-height: 1;
 }
 .cat-list li:hover .cat-drag-handle { opacity: 0.5; }
-.cat-drag-handle:hover { opacity: 1 !important; }
 
 .cat-dragging { opacity: 0.4; }
 .cat-drag-over { border-color: var(--gold) !important; background: rgba(241,211,130,0.08) !important; }
@@ -621,7 +646,7 @@ header {
 .sidebar-footer { padding: 20px; border-top: 1px solid var(--border); background: var(--surf); }
 .sidebar-footer input, .sidebar-footer select { 
     width: 100%; margin-bottom: 10px; background: #000; border: 1px solid var(--border); 
-    color: white !important; padding: 10px; border-radius: 6px; font-family: inherit;
+    color: white !important; padding: 10px; border-radius: 6px;
 }
 
 .toggle-icon { position: absolute; left: 22px; top: 12px; font-size: 0.7rem; color: var(--gold); z-index: 10; }
@@ -643,7 +668,6 @@ header {
     position: relative; 
     transition: transform 0.2s, box-shadow 0.2s; 
     cursor: grab; 
-    content-visibility: auto;
 }
 
 .card-item:hover { transform: translateY(-5px); box-shadow: 0 10px 20px rgba(0,0,0,0.5); }
@@ -676,7 +700,6 @@ header {
     border-radius: 4px; 
     font-family: 'Cinzel'; 
     font-weight: bold;
-    box-shadow: 0 2px 5px rgba(0,0,0,0.5);
 }
 
 #selection-box { position: absolute; background: rgba(241, 211, 130, 0.1); border: 1px solid var(--gold); pointer-events: none; display: none; z-index: 1000; }
@@ -698,40 +721,24 @@ header {
     box-shadow: 0 15px 50px rgba(0,0,0,0.8); 
 }
 
-.bulk-btn { border: none; background: #000; color: #fff; padding: 8px 18px; border-radius: 20px; cursor: pointer; font-size: 0.8rem; font-family: 'Cinzel'; transition: opacity 0.2s; }
-.bulk-btn:hover { opacity: 0.8; }
+.bulk-btn { border: none; background: #000; color: #fff; padding: 8px 18px; border-radius: 20px; cursor: pointer; font-size: 0.8rem; font-family: 'Cinzel'; }
 
 .overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.9); backdrop-filter: blur(8px); z-index: 5000; align-items: center; justify-content: center; }
 .overlay.open { display: flex; }
 
 .modal { background: var(--surf); border: 1px solid var(--border); padding: 2.5rem; border-radius: 15px; width: 400px; display: flex; flex-direction: column; gap: 1.2rem; }
-.modal h3 { font-family: 'Cinzel'; color: var(--gold); text-align: center; margin-bottom: 0.5rem; }
-.modal input, .modal select { background: var(--bg); border: 1px solid var(--border); color: white !important; padding: 12px; border-radius: 8px; font-size: 1rem; }
+.modal h3 { font-family: 'Cinzel'; color: var(--gold); text-align: center; }
+.modal input, .modal select { background: var(--bg); border: 1px solid var(--border); color: white !important; padding: 12px; border-radius: 8px; }
 
-.btn-gold { 
-    background: var(--gold); 
-    color: black; 
-    border: none; 
-    padding: 12px; 
-    border-radius: 8px; 
-    font-family: 'Cinzel'; 
-    font-weight: 900; 
-    cursor: pointer; 
-    transition: transform 0.2s;
-}
-.btn-gold:hover { transform: scale(1.02); }
+.btn-gold { background: var(--gold); color: black; border: none; padding: 12px; border-radius: 8px; font-family: 'Cinzel'; font-weight: 900; cursor: pointer; }
 
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
-::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+@keyframes spin{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
 
-<!-- LOGIN SCREEN -->
 <div id="login-screen">
-    <form class="login-card" onsubmit="handleLogin(event)">
+    <form class="login-card" id="login-form" onsubmit="window.handleLogin(event)">
         <h1>Collector Login</h1>
         <input type="text" id="login-user" placeholder="Benutzername" required>
         <input type="password" id="login-pass" placeholder="Passwort" required>
@@ -742,18 +749,23 @@ header {
 
 <div id="selection-box"></div>
 
+<div id="loading-overlay" style="display:none;position:fixed;inset:0;background:rgba(10,10,12,0.85);z-index:8000;align-items:center;justify-content:center;flex-direction:column;gap:1rem;font-family:'Cinzel';color:#f1d382;font-size:0.9rem;letter-spacing:0.1em;">
+  <div style="width:40px;height:40px;border:3px solid #333;border-top-color:#f1d382;border-radius:50%;animation:spin 0.8s linear infinite;"></div>
+  LADEN…
+</div>
+
 <div id="bulk-bar">
     <span id="bulk-count">0 markiert</span>
-    <button class="bulk-btn" onclick="bulkStatus('have')">BESITZ</button>
-    <button class="bulk-btn" onclick="bulkStatus('missing')">FEHLT</button>
-    <button class="bulk-btn" style="background:#800; color:white" onclick="bulkDelete()">LÖSCHEN</button>
+    <button class="bulk-btn" onclick="window.bulkStatus('have')">BESITZ</button>
+    <button class="bulk-btn" onclick="window.bulkStatus('missing')">FEHLT</button>
+    <button class="bulk-btn" style="background:#800; color:white" onclick="window.bulkDelete()">LÖSCHEN</button>
 </div>
 
 <div id="app">
   <header>
       <div class="logo">⬡ COLLECTOR ULTIMATE</div>
       <div id="fb-dot" class="fb-dot"></div>
-      <button class="logout-btn" onclick="logout()">LOGOUT</button>
+      <button class="logout-btn" onclick="window.logout()">LOGOUT</button>
       <div style="margin-left:auto; font-size:0.85rem; font-family:'Cinzel'; color: var(--gold);">
           TOTAL: <b id="stat-total" style="color: #fff;">0</b> | 
           OWNED: <b id="stat-have" style="color:#0f8">0</b>
@@ -762,10 +774,8 @@ header {
 
   <div class="toolbar">
       <input type="text" id="search-input" placeholder="Nach Karte suchen..." oninput="renderGrid()">
-      
-      <button id="btn-toggle-missing" class="btn-toggle" onclick="toggleMissingFilter()">NUR FEHLENDE</button>
-      
-      <select onchange="setCols(this.value)">
+      <button id="btn-toggle-missing" class="btn-toggle" onclick="window.toggleMissingFilter()">NUR FEHLENDE</button>
+      <select onchange="window.setCols(this.value)">
           <option value="auto">Auto Grid</option>
           <option value="2">2 Spalten</option>
           <option value="3">3 Spalten</option>
@@ -773,7 +783,6 @@ header {
           <option value="5">5 Spalten</option>
           <option value="6">6 Spalten</option>
           <option value="8">8 Spalten</option>
-          <option value="10">10 Spalten</option>
       </select>
   </div>
 
@@ -783,7 +792,7 @@ header {
         <div class="sidebar-footer">
             <input type="text" id="new-cat-name" placeholder="Neue Kategorie Name...">
             <select id="new-cat-parent"></select>
-            <button class="btn-gold" style="width:100%;" onclick="addCategory()">KATEGORIE ERSTELLEN</button>
+            <button class="btn-gold" style="width:100%;" onclick="window.addCategory()">KATEGORIE ERSTELLEN</button>
         </div>
     </aside>
     <div class="grid-container">
@@ -802,7 +811,7 @@ header {
             <option value="have">Im Besitz</option>
             <option value="missing">Fehlt</option>
         </select>
-        <button class="btn-gold" onclick="saveCard()">SPEICHERN</button>
+        <button class="btn-gold" onclick="window.saveCard()">SPEICHERN</button>
         <button class="btn-gold" style="background:#222; color:#fff" onclick="document.getElementById('modal-overlay').classList.remove('open')">ABBRECHEN</button>
     </div>
 </div>
