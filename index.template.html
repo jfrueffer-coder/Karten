@@ -124,19 +124,27 @@ function updateStats() {
   document.getElementById('stat-have').textContent = have;
 }
 
-// ── SIDEBAR ───────────────────────────────────────────────────
+// ── SIDEBAR & CATEGORY DRAG LOGIC ─────────────────────────────
+let draggedCatName = null;
+let draggedParent = null;
+
 function renderSidebar() {
   const container = document.getElementById('cat-list');
   container.innerHTML = '';
+  
+  // "Alle Karten" Statischer Link
   container.appendChild(createCatEl({name: '', parent: null}, 'Alle Karten'));
 
   const parents = categories.filter(c => !c.parent).sort((a,b) => (a.pos||0) - (b.pos||0));
+  
   parents.forEach(p => {
     const isCollapsed = collapsedCats.has(p.name);
     const li = createCatEl(p, p.name, false, true, isCollapsed);
     container.appendChild(li);
+    
     if (!isCollapsed) {
-      categories.filter(c => c.parent === p.name).sort((a,b) => (a.pos||0) - (b.pos||0)).forEach(s => {
+      const subs = categories.filter(c => c.parent === p.name).sort((a,b) => (a.pos||0) - (b.pos||0));
+      subs.forEach(s => {
         container.appendChild(createCatEl(s, s.name, true));
       });
     }
@@ -149,103 +157,91 @@ function createCatEl(cat, label, isSub = false, hasChildren = false, isCollapsed
   const pct = total > 0 ? Math.round((owned / total) * 100) : 0;
   
   const li = document.createElement('li');
-  li.className = (activeCat === cat.name ? 'active ' : '') + (isSub ? 'sub-cat' : '');
+  li.className = (activeCat === cat.name ? 'active ' : '') + (isSub ? 'sub-cat' : 'parent-cat');
+  li.dataset.name = cat.name;
+  li.dataset.parent = cat.parent || '';
 
   if (cat.name !== '') {
     li.draggable = true;
-    li.dataset.catName = cat.name;
-    li.dataset.parent = cat.parent || '';
-
+    
     li.addEventListener('dragstart', e => {
-      e.stopPropagation();
-      e.dataTransfer.setData('cat-drag-name', cat.name);
-      e.dataTransfer.setData('cat-drag-parent', cat.parent || '');
-      li.classList.add('cat-dragging');
+      draggedCatName = cat.name;
+      draggedParent = cat.parent || '';
+      li.classList.add('is-dragging-item');
+      e.dataTransfer.effectAllowed = 'move';
     });
 
     li.addEventListener('dragend', () => {
-      li.classList.remove('cat-dragging');
-      document.querySelectorAll('.drop-before, .drop-after').forEach(el => {
-          el.classList.remove('drop-before', 'drop-after');
-      });
+      li.classList.remove('is-dragging-item');
+      clearDropIndicators();
     });
 
     li.addEventListener('dragover', e => {
       e.preventDefault();
-      e.stopPropagation();
-      const draggedName = e.dataTransfer.getData('cat-drag-name');
-      const draggedParent = e.dataTransfer.getData('cat-drag-parent');
-      
-      // Nur sortieren, wenn im gleichen Level (Sub zu Sub oder Parent zu Parent)
+      if (draggedCatName === cat.name) return;
+      // Nur sortieren innerhalb der gleichen Ebene
       if (draggedParent !== (cat.parent || '')) return;
 
       const rect = li.getBoundingClientRect();
-      const midpoint = rect.top + rect.height / 2;
+      const next = (e.clientY - rect.top) / (rect.bottom - rect.top) > 0.5;
       
-      li.classList.remove('drop-before', 'drop-after');
-      if (e.clientY < midpoint) {
-        li.classList.add('drop-before');
-      } else {
-        li.classList.add('drop-after');
-      }
-    });
-
-    li.addEventListener('dragleave', () => {
-      li.classList.remove('drop-before', 'drop-after');
+      clearDropIndicators();
+      li.classList.add(next ? 'drop-after' : 'drop-before');
     });
 
     li.addEventListener('drop', async e => {
       e.preventDefault();
-      e.stopPropagation();
-      
-      const draggedName = e.dataTransfer.getData('cat-drag-name');
-      const draggedParent = e.dataTransfer.getData('cat-drag-parent');
-      const isBefore = li.classList.contains('drop-before');
-      
-      li.classList.remove('drop-before', 'drop-after');
+      const isAfter = li.classList.contains('drop-after');
+      clearDropIndicators();
 
-      if (!draggedName || draggedName === cat.name) return;
+      if (!draggedCatName || draggedCatName === cat.name) return;
       if (draggedParent !== (cat.parent || '')) return;
 
-      // Logik: Alle Kategorien der gleichen Ebene holen
+      // Neue Sortierung berechnen
       let siblings = categories
         .filter(c => (c.parent || '') === draggedParent)
         .sort((a,b) => (a.pos || 0) - (b.pos || 0));
       
-      const draggedIdx = siblings.findIndex(c => c.name === draggedName);
-      const draggedObj = siblings.splice(draggedIdx, 1)[0];
+      const fromIdx = siblings.findIndex(c => c.name === draggedCatName);
+      const movedItem = siblings.splice(fromIdx, 1)[0];
       
-      let targetIdx = siblings.findIndex(c => c.name === cat.name);
-      if (!isBefore) targetIdx++;
+      let toIdx = siblings.findIndex(c => c.name === cat.name);
+      if (isAfter) toIdx++;
       
-      siblings.splice(targetIdx, 0, draggedObj);
+      siblings.splice(toIdx, 0, movedItem);
       
-      // Batch Update der Positionen
       const batch = writeBatch(db);
-      siblings.forEach((c, index) => {
-        batch.update(doc(db, 'categories', c.name), { pos: index });
+      siblings.forEach((c, i) => {
+        batch.update(doc(db, 'categories', c.name), { pos: i });
       });
       await batch.commit();
     });
   }
 
   let toggle = hasChildren ? `<span class="toggle-icon" onclick="event.stopPropagation(); window.toggleCatCollapse('${cat.name}')">${isCollapsed ? '▶' : '▼'}</span>` : '';
-  let dragHandle = cat.name !== '' ? `<span class="cat-drag-handle" title="Sortieren">⠿</span>` : '';
-  let renameBtn = cat.name !== '' ? `<span class="cat-rename" onclick="event.stopPropagation(); window.renameCategory('${cat.name}')" title="Umbenennen">✏️</span>` : '';
+  let dragHandle = cat.name !== '' ? `<span class="cat-drag-handle">⠿</span>` : '';
+  let renameBtn = cat.name !== '' ? `<span class="cat-rename" onclick="event.stopPropagation(); window.renameCategory('${cat.name}')">✏️</span>` : '';
   let deleteBtn = (cat.name !== '' && total === 0) ? `<span class="cat-delete" onclick="event.stopPropagation(); window.removeCategory('${cat.name}')">×</span>` : '';
 
   li.onclick = () => { activeCat = cat.name; renderGrid(); renderSidebar(); };
   
   li.innerHTML = `
     <div class="per-bg" style="width:${pct}%"></div>
-    ${dragHandle}
-    ${toggle}
-    <span class="cat-label">${label}</span>
-    <span class="cat-stats">${owned} / ${total} | ${pct}%</span>
-    ${renameBtn}
-    ${deleteBtn}
+    <div class="cat-content">
+        ${dragHandle}
+        ${toggle}
+        <span class="cat-label">${label}</span>
+        <span class="cat-stats">${owned}/${total}</span>
+        <div class="cat-actions">${renameBtn}${deleteBtn}</div>
+    </div>
   `;
   return li;
+}
+
+function clearDropIndicators() {
+    document.querySelectorAll('.drop-before, .drop-after').forEach(el => {
+        el.classList.remove('drop-before', 'drop-after');
+    });
 }
 
 window.toggleCatCollapse = (name) => {
@@ -366,7 +362,7 @@ async function processImageFile(file) {
 
 window.addEventListener('dragover', e => e.preventDefault());
 window.addEventListener('drop', async e => {
-  if (e.dataTransfer.getData('card-id') || e.dataTransfer.getData('cat-drag-name')) return;
+  if (e.dataTransfer.getData('card-id') || draggedCatName) return;
   if (e.target.closest('#login-screen')) return;
   e.preventDefault();
   
@@ -472,12 +468,8 @@ window.addCategory = async () => {
   const n = document.getElementById('new-cat-name').value.trim();
   const p = document.getElementById('new-cat-parent').value;
   if (n) {
-    const siblings = categories.filter(c => (c.parent || '') === (p || ''));
-    await setDoc(doc(db, 'categories', n), { 
-        name: n, 
-        parent: p || null, 
-        pos: siblings.length 
-    });
+      const siblings = categories.filter(c => (c.parent || '') === (p || ''));
+      await setDoc(doc(db, 'categories', n), { name: n, parent: p || null, pos: siblings.length });
   }
   document.getElementById('new-cat-name').value = '';
 };
@@ -520,281 +512,111 @@ window.setCols = (c) => {
     --border: #22222a; 
     --gold: #f1d382; 
     --text: #e0e0e0; 
-    --accent: #2c2c34;
+    --accent: #1a1a20;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: 'Crimson Pro', serif; overflow: hidden; }
 
-body { 
-    background: var(--bg); 
-    color: var(--text); 
-    font-family: 'Crimson Pro', serif; 
-    overflow: hidden; 
-}
-
-#login-screen {
-    position: fixed;
-    inset: 0;
-    background: var(--bg);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 9999;
-}
-
-.login-card {
-    background: var(--surf);
-    border: 1px solid var(--border);
-    padding: 3rem;
-    border-radius: 20px;
-    width: 380px;
-    text-align: center;
-    box-shadow: 0 20px 50px rgba(0,0,0,0.5);
-}
-
+/* LOGIN */
+#login-screen { position: fixed; inset: 0; background: var(--bg); display: flex; align-items: center; justify-content: center; z-index: 9999; }
+.login-card { background: var(--surf); border: 1px solid var(--border); padding: 3rem; border-radius: 20px; width: 380px; text-align: center; box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
 .login-card h1 { font-family: 'Cinzel'; color: var(--gold); margin-bottom: 2rem; font-size: 1.5rem; }
-.login-card input {
-    width: 100%;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: white;
-    padding: 12px;
-    margin-bottom: 1rem;
-    border-radius: 8px;
-    outline: none;
-}
+.login-card input { width: 100%; background: var(--bg); border: 1px solid var(--border); color: white; padding: 12px; margin-bottom: 1rem; border-radius: 8px; outline: none; }
 
-#login-error { color: #ff4d4d; font-size: 0.8rem; margin-bottom: 1rem; height: 1rem; }
-
+/* APP LAYOUT */
 #app { display: none; grid-template-rows: 60px 60px 1fr; height: 100vh; }
-
-header { 
-    background: var(--surf); 
-    border-bottom: 1px solid var(--border); 
-    display: flex; 
-    align-items: center; 
-    padding: 0 2rem; 
-    gap: 1rem; 
-    box-shadow: 0 2px 10px rgba(0,0,0,0.5);
-}
-
+header { background: var(--surf); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 2rem; gap: 1rem; }
 .logo { font-family: 'Cinzel'; font-weight: 900; color: var(--gold); letter-spacing: 2px; font-size: 1.2rem; }
-
-.fb-dot { width: 10px; height: 10px; border-radius: 50%; background: #333; }
-.fb-dot.online { background: #00ff88; box-shadow: 0 0 10px #00ff88; }
-
-.logout-btn {
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 5px 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 0.7rem;
-    font-family: 'Cinzel';
-}
-
-.toolbar { 
-    background: #1a1a20; 
-    border-bottom: 1px solid var(--border); 
-    display: flex; 
-    align-items: center; 
-    padding: 0 2rem; 
-    gap: 1.5rem; 
-}
-
-.toolbar select, .toolbar input { 
-    background: var(--bg); 
-    border: 1px solid var(--border); 
-    color: white; 
-    padding: 8px 12px; 
-    border-radius: 6px; 
-    outline: none; 
-    font-size: 0.9rem;
-}
-
-.btn-toggle {
-    background: var(--accent);
-    color: var(--text);
-    border: 1px solid var(--border);
-    padding: 8px 15px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-family: 'Cinzel';
-    font-size: 0.75rem;
-    font-weight: bold;
-    transition: all 0.3s;
-}
-
-.btn-toggle.active {
-    background: var(--gold);
-    color: black;
-    border-color: var(--gold);
-}
-
+.toolbar { background: var(--accent); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 2rem; gap: 1.5rem; }
 .main { display: flex; overflow: hidden; }
 
-.sidebar { 
-    width: 300px; 
-    background: var(--surf); 
-    border-right: 1px solid var(--border); 
-    display: flex; 
-    flex-direction: column; 
-}
-
+/* SIDEBAR & KATEGORIEN NEU */
+.sidebar { width: 320px; background: var(--surf); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
 .cat-list { flex: 1; overflow-y: auto; padding: 15px; list-style: none; }
 
 .cat-list li { 
-    padding: 10px 15px; 
-    margin-bottom: 6px; 
-    border: 1px solid var(--border); 
-    border-radius: 8px; 
-    cursor: pointer; 
-    position: relative; 
-    overflow: hidden; 
-    display: flex; 
-    flex-direction: column;
-    gap: 4px;
-    transition: border-color 0.2s, background 0.2s;
-}
-
-/* DRAG INDICATORS */
-.drop-before { border-top: 3px solid var(--gold) !important; }
-.drop-after { border-bottom: 3px solid var(--gold) !important; }
-
-.cat-list li.active { border-color: var(--gold); background: rgba(241, 211, 130, 0.05); }
-.cat-list li.sub-cat { margin-left: 20px; font-size: 0.9rem; }
-
-.cat-delete {
-    position: absolute;
-    right: 10px;
-    top: 50%;
-    transform: translateY(-50%);
-    color: #ff4d4d;
-    font-size: 1.5rem;
-    font-weight: bold;
-    opacity: 0;
-    transition: 0.2s;
-    z-index: 11;
-}
-.cat-list li:hover .cat-delete { opacity: 1; }
-
-.cat-rename {
-    position: absolute;
-    right: 34px;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 0.85rem;
-    opacity: 0;
-    transition: 0.2s;
+    position: relative;
+    background: #1a1a22;
+    border: 1px solid var(--border);
+    margin-bottom: 8px;
+    border-radius: 6px;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     cursor: pointer;
-    z-index: 11;
+    overflow: hidden;
 }
-.cat-list li:hover .cat-rename { opacity: 0.7; }
 
-.cat-drag-handle {
+.cat-list li.sub-cat { margin-left: 24px; background: #14141a; scale: 0.96; }
+.cat-list li.active { border-color: var(--gold); box-shadow: inset 0 0 10px rgba(241, 211, 130, 0.1); }
+
+/* DRAG & DROP VISUALS */
+.is-dragging-item { opacity: 0.3; scale: 0.95; filter: grayscale(1); }
+
+.drop-before { margin-top: 50px !important; border-top: 2px solid var(--gold) !important; }
+.drop-after { margin-bottom: 50px !important; border-bottom: 2px solid var(--gold) !important; }
+
+/* PLACEHOLDER EFFEKT */
+.drop-before::before, .drop-after::after {
+    content: 'HIER ABLEGEN';
     position: absolute;
-    left: 6px;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 1rem;
+    left: 0; right: 0;
+    height: 40px;
+    background: rgba(241, 211, 130, 0.05);
+    border: 1px dashed var(--gold);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Cinzel';
+    font-size: 0.6rem;
     color: var(--gold);
-    opacity: 0;
-    cursor: grab;
-    z-index: 10;
+    border-radius: 6px;
 }
-.cat-list li:hover .cat-drag-handle { opacity: 0.5; }
+.drop-before::before { top: -45px; }
+.drop-after::after { bottom: -45px; }
 
-.cat-dragging { opacity: 0.4; background: #222 !important; }
-
-.sidebar-footer { padding: 20px; border-top: 1px solid var(--border); background: var(--surf); }
-.sidebar-footer input, .sidebar-footer select { 
-    width: 100%; margin-bottom: 10px; background: #000; border: 1px solid var(--border); 
-    color: white !important; padding: 10px; border-radius: 6px;
-}
-
-.toggle-icon { position: absolute; left: 22px; top: 12px; font-size: 0.7rem; color: var(--gold); z-index: 10; }
-
-.per-bg { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(241, 211, 130, 0.08); z-index: 0; pointer-events: none; }
-
-.cat-label { position: relative; z-index: 1; font-weight: 600; padding-left: 18px; pointer-events: none; }
-.cat-stats { font-size: 0.75rem; color: var(--gold); opacity: 0.8; position: relative; z-index: 1; font-family: 'Cinzel'; pointer-events: none; }
-
-.grid-container { flex: 1; padding: 2rem; overflow-y: auto; position: relative; background: #08080a; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 1.5rem; }
-
-.card-item { 
-    background: #000; 
-    border: 1px solid var(--border); 
-    aspect-ratio: 63/88; 
-    border-radius: 8px; 
-    overflow: hidden; 
+.cat-content { 
+    display: flex; 
+    align-items: center; 
+    padding: 12px; 
+    gap: 10px; 
     position: relative; 
-    transition: transform 0.2s, box-shadow 0.2s; 
-    cursor: grab; 
+    z-index: 2; 
 }
 
+.cat-drag-handle { color: var(--gold); cursor: grab; opacity: 0.4; font-size: 1.2rem; }
+.cat-drag-handle:hover { opacity: 1; }
+
+.cat-label { flex: 1; font-weight: 600; font-size: 0.9rem; }
+.cat-stats { font-family: 'Cinzel'; font-size: 0.7rem; color: var(--gold); opacity: 0.7; }
+
+.cat-actions { display: flex; gap: 8px; opacity: 0; transition: 0.2s; }
+.cat-list li:hover .cat-actions { opacity: 1; }
+
+.cat-rename, .cat-delete { cursor: pointer; font-size: 0.9rem; padding: 2px; }
+.cat-delete { color: #ff4d4d; }
+
+.per-bg { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(241, 211, 130, 0.04); z-index: 1; pointer-events: none; }
+
+/* GRID & CARDS */
+.grid-container { flex: 1; padding: 2rem; overflow-y: auto; background: #08080a; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 1.5rem; }
+.card-item { background: #000; border: 1px solid var(--border); aspect-ratio: 63/88; border-radius: 8px; overflow: hidden; position: relative; transition: 0.2s; cursor: grab; }
 .card-item:hover { transform: translateY(-5px); box-shadow: 0 10px 20px rgba(0,0,0,0.5); }
 .card-item.selected { border-color: var(--gold); box-shadow: 0 0 15px rgba(241, 211, 130, 0.3); }
-
 .card-item.is-missing { opacity: 0.25; filter: grayscale(1); }
-
 .card-img-wrap { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; pointer-events: none; }
 .card-img-wrap img { width: 100%; height: 100%; object-fit: cover; }
+.card-info { position: absolute; bottom: 0; width: 100%; background: linear-gradient(transparent, rgba(0,0,0,0.9)); padding: 15px 5px 8px; font-size: 0.7rem; text-align: center; font-weight: 600; }
+.badge { position: absolute; top: 8px; left: 8px; background: #ff4d4d; color: white; font-size: 0.6rem; padding: 3px 6px; border-radius: 4px; font-family: 'Cinzel'; }
 
-.card-info { 
-    position: absolute; 
-    bottom: 0; 
-    width: 100%; 
-    background: linear-gradient(transparent, rgba(0,0,0,0.9)); 
-    padding: 15px 5px 8px; 
-    font-size: 0.7rem; 
-    text-align: center; 
-    font-weight: 600;
-}
-
-.badge { 
-    position: absolute; 
-    top: 8px; 
-    left: 8px; 
-    background: #ff4d4d; 
-    color: white;
-    font-size: 0.6rem; 
-    padding: 3px 6px; 
-    border-radius: 4px; 
-    font-family: 'Cinzel'; 
-    font-weight: bold;
-}
-
-#selection-box { position: absolute; background: rgba(241, 211, 130, 0.1); border: 1px solid var(--gold); pointer-events: none; display: none; z-index: 1000; }
-
-#bulk-bar { 
-    position: fixed; 
-    bottom: 30px; 
-    left: 50%; 
-    transform: translateX(-50%); 
-    background: var(--gold); 
-    color: black; 
-    padding: 15px 30px; 
-    border-radius: 50px; 
-    display: none; 
-    gap: 20px; 
-    align-items: center; 
-    font-weight: bold; 
-    z-index: 2000; 
-    box-shadow: 0 15px 50px rgba(0,0,0,0.8); 
-}
-
-.bulk-btn { border: none; background: #000; color: #fff; padding: 8px 18px; border-radius: 20px; cursor: pointer; font-size: 0.8rem; font-family: 'Cinzel'; }
-
+/* MODALS & MISC */
 .overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.9); backdrop-filter: blur(8px); z-index: 5000; align-items: center; justify-content: center; }
 .overlay.open { display: flex; }
-
 .modal { background: var(--surf); border: 1px solid var(--border); padding: 2.5rem; border-radius: 15px; width: 400px; display: flex; flex-direction: column; gap: 1.2rem; }
-.modal h3 { font-family: 'Cinzel'; color: var(--gold); text-align: center; }
-.modal input, .modal select { background: var(--bg); border: 1px solid var(--border); color: white !important; padding: 12px; border-radius: 8px; }
-
 .btn-gold { background: var(--gold); color: black; border: none; padding: 12px; border-radius: 8px; font-family: 'Cinzel'; font-weight: 900; cursor: pointer; }
+
+#selection-box { position: absolute; background: rgba(241, 211, 130, 0.1); border: 1px solid var(--gold); pointer-events: none; display: none; z-index: 1000; }
+#bulk-bar { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: var(--gold); color: black; padding: 15px 30px; border-radius: 50px; display: none; gap: 20px; align-items: center; z-index: 2000; }
 
 @keyframes spin{to{transform:rotate(360deg)}}
 </style>
@@ -802,7 +624,7 @@ header {
 <body>
 
 <div id="login-screen">
-    <form class="login-card" id="login-form" onsubmit="window.handleLogin(event)">
+    <form class="login-card" onsubmit="window.handleLogin(event)">
         <h1>Collector Login</h1>
         <input type="text" id="login-user" placeholder="Benutzername" required>
         <input type="password" id="login-pass" placeholder="Passwort" required>
@@ -813,50 +635,45 @@ header {
 
 <div id="selection-box"></div>
 
-<div id="loading-overlay" style="display:none;position:fixed;inset:0;background:rgba(10,10,12,0.85);z-index:8000;align-items:center;justify-content:center;flex-direction:column;gap:1rem;font-family:'Cinzel';color:#f1d382;font-size:0.9rem;letter-spacing:0.1em;">
+<div id="loading-overlay" style="display:none;position:fixed;inset:0;background:rgba(10,10,12,0.85);z-index:8000;align-items:center;justify-content:center;flex-direction:column;gap:1rem;font-family:'Cinzel';color:#f1d382;">
   <div style="width:40px;height:40px;border:3px solid #333;border-top-color:#f1d382;border-radius:50%;animation:spin 0.8s linear infinite;"></div>
   LADEN…
 </div>
 
 <div id="bulk-bar">
     <span id="bulk-count">0 markiert</span>
-    <button class="bulk-btn" onclick="window.bulkStatus('have')">BESITZ</button>
-    <button class="bulk-btn" onclick="window.bulkStatus('missing')">FEHLT</button>
-    <button class="bulk-btn" style="background:#800; color:white" onclick="window.bulkDelete()">LÖSCHEN</button>
+    <button class="btn-gold" style="padding: 5px 15px;" onclick="window.bulkStatus('have')">BESITZ</button>
+    <button class="btn-gold" style="padding: 5px 15px;" onclick="window.bulkStatus('missing')">FEHLT</button>
+    <button class="btn-gold" style="background:#800; color:white; padding: 5px 15px;" onclick="window.bulkDelete()">LÖSCHEN</button>
 </div>
 
 <div id="app">
   <header>
       <div class="logo">⬡ COLLECTOR ULTIMATE</div>
-      <div id="fb-dot" class="fb-dot"></div>
-      <button class="logout-btn" onclick="window.logout()">LOGOUT</button>
-      <div style="margin-left:auto; font-size:0.85rem; font-family:'Cinzel'; color: var(--gold);">
-          TOTAL: <b id="stat-total" style="color: #fff;">0</b> | 
-          OWNED: <b id="stat-have" style="color:#0f8">0</b>
+      <div id="fb-dot" class="fb-dot" style="width:10px;height:10px;border-radius:50%;background:#333;"></div>
+      <button onclick="window.logout()" style="background:transparent; border:1px solid #333; color:#eee; padding:4px 10px; cursor:pointer;">LOGOUT</button>
+      <div style="margin-left:auto; font-family:'Cinzel'; color: var(--gold);">
+          TOTAL: <span id="stat-total">0</span> | OWNED: <span id="stat-have">0</span>
       </div>
   </header>
 
   <div class="toolbar">
-      <input type="text" id="search-input" placeholder="Nach Karte suchen..." oninput="renderGrid()">
-      <button id="btn-toggle-missing" class="btn-toggle" onclick="window.toggleMissingFilter()">NUR FEHLENDE</button>
-      <select onchange="window.setCols(this.value)">
+      <input type="text" id="search-input" placeholder="Suchen..." oninput="renderGrid()" style="background:#000; border:1px solid #333; color:#fff; padding:8px;">
+      <button id="btn-toggle-missing" class="btn-gold" style="padding:8px 15px; font-size:0.7rem;" onclick="window.toggleMissingFilter()">ALLE ANZEIGEN</button>
+      <select onchange="window.setCols(this.value)" style="background:#000; color:#fff; padding:8px;">
           <option value="auto">Auto Grid</option>
-          <option value="2">2 Spalten</option>
-          <option value="3">3 Spalten</option>
           <option value="4">4 Spalten</option>
-          <option value="5">5 Spalten</option>
           <option value="6">6 Spalten</option>
-          <option value="8">8 Spalten</option>
       </select>
   </div>
 
   <div class="main">
     <aside class="sidebar">
         <ul class="cat-list" id="cat-list"></ul>
-        <div class="sidebar-footer">
-            <input type="text" id="new-cat-name" placeholder="Neue Kategorie Name...">
-            <select id="new-cat-parent"></select>
-            <button class="btn-gold" style="width:100%;" onclick="window.addCategory()">KATEGORIE ERSTELLEN</button>
+        <div style="padding:20px; border-top:1px solid var(--border);">
+            <input type="text" id="new-cat-name" placeholder="Name..." style="width:100%; padding:10px; margin-bottom:10px; background:#000; border:1px solid #333; color:#fff;">
+            <select id="new-cat-parent" style="width:100%; padding:10px; margin-bottom:10px; background:#000; border:1px solid #333; color:#fff;"></select>
+            <button class="btn-gold" style="width:100%" onclick="window.addCategory()">KATEGORIE ERSTELLEN</button>
         </div>
     </aside>
     <div class="grid-container">
@@ -868,11 +685,11 @@ header {
 <div class="overlay" id="modal-overlay">
     <div class="modal">
         <h3>Karte Editieren</h3>
-        <input type="text" id="f-name" placeholder="Name der Karte">
-        <input type="text" id="f-set" placeholder="Edition / Set">
+        <input type="text" id="f-name">
+        <input type="text" id="f-set">
         <select id="f-cat"></select>
         <select id="f-status">
-            <option value="have">Im Besitz</option>
+            <option value="have">Besitz</option>
             <option value="missing">Fehlt</option>
         </select>
         <button class="btn-gold" onclick="window.saveCard()">SPEICHERN</button>
