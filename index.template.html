@@ -122,7 +122,8 @@ function subscribeData() {
   onSnapshot(
     collection(db, 'categories'),
     snap => {
-      categories = snap.docs.map(d => d.data());
+      // WICHTIG: Die echte Dokument-ID (docId) wird jetzt mitgespeichert!
+      categories = snap.docs.map(d => ({ docId: d.id, ...d.data() }));
       catsReady = true; checkReady(); renderAll();
     },
     err => { console.error('Categories error:', err); showLoading(false); }
@@ -137,7 +138,7 @@ function showLoading(on) {
 
 let _renderTimer = null;
 function renderAll() {
-  if (window.isDraggingCategory) return; // UI nicht neuladen, wenn gerade gezogen wird
+  if (window.isDraggingCategory) return; 
   if (_renderTimer) clearTimeout(_renderTimer);
   _renderTimer = setTimeout(() => {
     _renderTimer = null;
@@ -209,7 +210,7 @@ function renderSidebar() {
 
 function initSortable(el) {
   window.sortableInstances.push(new Sortable(el, {
-    group: 'categories', // EINE Gruppe für alle (Main & Sub), ermöglicht Level-Crossing
+    group: 'categories', 
     handle: '.cat-drag-handle',
     animation: 250,
     easing: "cubic-bezier(0.4, 0, 0.2, 1)",
@@ -219,7 +220,6 @@ function initSortable(el) {
     swapThreshold: 0.65,
     onStart: () => { window.isDraggingCategory = true; },
     onMove: (evt) => {
-        // Verhindere, dass eine Kategorie MIT eigenen Unterkategorien in eine andere Kategorie gezogen wird
         const draggedName = evt.dragged.dataset.catName;
         const hasChildren = categories.some(c => c.parent === draggedName);
         const isTargetSub = evt.to.classList.contains('sub-cat-list');
@@ -227,7 +227,7 @@ function initSortable(el) {
     },
     onEnd: async (evt) => {
       window.isDraggingCategory = false;
-      if (evt.from === evt.to && evt.oldIndex === evt.newIndex) return; // Nichts passiert
+      if (evt.from === evt.to && evt.oldIndex === evt.newIndex) return; 
       
       const newParent = evt.to.dataset.parent || null;
       const items = Array.from(evt.to.children);
@@ -235,14 +235,17 @@ function initSortable(el) {
       
       items.forEach((el, index) => {
          const name = el.dataset.catName;
+         const catObj = categories.find(c => c.name === name);
+         if (!catObj) return;
+
          if (name === evt.item.dataset.catName) {
-             batch.update(doc(db, 'categories', name), { pos: (index + 1) * 1000, parent: newParent });
+             batch.update(doc(db, 'categories', catObj.docId), { pos: (index + 1) * 1000, parent: newParent });
          } else {
-             batch.update(doc(db, 'categories', name), { pos: (index + 1) * 1000 });
+             batch.update(doc(db, 'categories', catObj.docId), { pos: (index + 1) * 1000 });
          }
       });
       await batch.commit();
-      renderAll(); // Forciert einen UI Refresh nach dem Drop
+      renderAll(); 
     }
   }));
 }
@@ -263,10 +266,7 @@ function createCatWrapper(cat, isSub = false) {
   const children = categories.filter(c => c.parent === cat.name).sort((a,b) => (a.pos||0) - (b.pos||0));
   const hasChildren = children.length > 0;
   
-  // Wenn sie leer ist, erzwingen wir, dass sie NICHT eingeklappt ist (damit man droppen kann)
   const isCollapsed = hasChildren && collapsedCats.has(cat.name);
-
-  // Überprüfen, ob Kategorie wirklich 100% leer ist
   const hasCards = cards.some(c => c.cat === cat.name);
   const isEmpty = !hasChildren && !hasCards;
 
@@ -275,13 +275,11 @@ function createCatWrapper(cat, isSub = false) {
   const iconEdit = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>`;
   const iconTrash = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`;
 
-  // Toggle Icon nur anzeigen, wenn es Kinder gibt
   let toggle = hasChildren ? `<span class="toggle-icon ${isCollapsed ? 'rotated' : ''}" id="toggle-icon-${cat.name}" onclick="event.stopPropagation(); toggleCatCollapse('${cat.name}')">${iconChevron}</span>` : `<span class="toggle-icon empty"></span>`;
-  
   let dragHandle = `<span class="cat-drag-handle" title="Sortieren">${iconDrag}</span>`;
   let renameBtn = `<span class="cat-action cat-rename" onclick="event.stopPropagation(); renameCategory('${cat.name}')" title="Umbenennen">${iconEdit}</span>`;
   
-  // Delete Button nur wenn WIRKLICH komplett leer
+  // LÖSCHEN GESTATTET
   let deleteBtn = isEmpty ? `<span class="cat-action cat-delete" onclick="event.stopPropagation(); removeCategory('${cat.name}')" title="Löschen">${iconTrash}</span>` : '';
 
   content.innerHTML = `
@@ -305,7 +303,6 @@ function createCatWrapper(cat, isSub = false) {
 
   wrapper.appendChild(content);
 
-  // Immer Sub-Wrapper generieren (damit man Items hineindroppen kann), außer bei Subs
   if (!isSub) {
     const subWrapper = document.createElement('div');
     subWrapper.className = `sub-cat-wrapper ${isCollapsed ? 'collapsed' : ''}`;
@@ -335,7 +332,6 @@ async function _addCategory() {
   const inputEl = document.getElementById('new-cat-name');
   const parentEl = document.getElementById('new-cat-parent');
   
-  // Bereinige Name (Slashes entfernen, da sie Firestore Pfade zerstören)
   const n = inputEl.value.trim().replace(/\//g, '-');
   const p = parentEl.value;
   
@@ -345,7 +341,6 @@ async function _addCategory() {
      return;
   }
   
-  // Finde die maximale Position für das korrekte Einreihen
   const siblings = categories.filter(c => (c.parent || null) === (p || null));
   const maxPos = siblings.reduce((max, c) => Math.max(max, c.pos || 0), 0);
   const newPos = maxPos + 1000;
@@ -355,7 +350,9 @@ async function _addCategory() {
 }
 
 async function _removeCategory(name) {
-  // Hard-Check Backendseitig zur Sicherheit
+  const catObj = categories.find(c => c.name === name);
+  if (!catObj) return;
+
   const children = categories.filter(c => c.parent === name);
   if (children.length > 0) return alert('Kategorie kann nicht gelöscht werden: Sie enthält noch Unterkategorien!');
   
@@ -364,12 +361,16 @@ async function _removeCategory(name) {
 
   if (!confirm(`Kategorie "${name}" wirklich löschen?`)) return;
   
-  await deleteDoc(doc(db, 'categories', name));
+  // Wichtig: Nutzt die echte docId!
+  await deleteDoc(doc(db, 'categories', catObj.docId));
   if (activeCat === name) activeCat = '';
   renderAll();
 }
 
 async function _renameCategory(oldName) {
+  const oldCat = categories.find(c => c.name === oldName);
+  if (!oldCat) return;
+
   const newName = prompt(`Kategorie "${oldName}" umbenennen in:`, oldName);
   if (!newName || newName.trim() === '' || newName.trim() === oldName) return;
   
@@ -379,22 +380,22 @@ async function _renameCategory(oldName) {
       return; 
   }
   
-  const oldCat = categories.find(c => c.name === oldName);
   const batch = writeBatch(db);
   
-  // 1. Neue Kategorie setzen
-  batch.set(doc(db, 'categories', trimmed), { ...oldCat, name: trimmed });
-  // 2. Alte Kategorie löschen
-  batch.delete(doc(db, 'categories', oldName));
+  // Neue Kategorie erstellen (mit getrimmten Namen als ID zur Sicherheit)
+  batch.set(doc(db, 'categories', trimmed), { name: trimmed, parent: oldCat.parent || null, pos: oldCat.pos || Date.now() });
   
-  // 3. Karten updaten
+  // Altes Dokument löschen anhand seiner echten docId!
+  batch.delete(doc(db, 'categories', oldCat.docId));
+  
+  // Karten updaten
   cards.filter(c => c.cat === oldName).forEach(c => {
       batch.update(doc(db, 'cards', c.id), { cat: trimmed });
   });
   
-  // 4. Unterkategorien updaten (falls oldName ein Parent war)
+  // Unterkategorien updaten
   categories.filter(c => c.parent === oldName).forEach(c => {
-      batch.update(doc(db, 'categories', c.name), { parent: trimmed });
+      batch.update(doc(db, 'categories', c.docId), { parent: trimmed });
   });
   
   await batch.commit();
@@ -425,13 +426,15 @@ function renderGrid() {
     div.className = `card-item ${opacityClass} ${selectedCards.has(c.id) ? 'selected' : ''}`;
     div.dataset.id = c.id;
     div.draggable = true;
+    
+    // Die Titel und der abgedunkelte Verlauf wurden hier absichtlich entfernt
     div.innerHTML = `
       <div class="card-img-wrap">${c.image
         ? `<img data-src="${c.image}" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E" loading="lazy" decoding="async" class="lazy-img">`
         : '<span>🃏</span>'}</div>
       ${c.status === 'missing' ? '<div class="badge">Fehlt</div>' : ''}
-      <div class="card-info"><span class="card-title">${c.name || 'Ohne Titel'}</span></div>
     `;
+    
     div.ondblclick = () => {
       if (div._clickTimer) { clearTimeout(div._clickTimer); div._clickTimer = null; }
       openEditModal(c);
@@ -843,7 +846,6 @@ header {
 .sub-cat-wrapper.collapsed { grid-template-rows: 0fr; }
 .sub-cat-wrapper-inner { overflow: hidden; }
 
-/* Die Drop-Zone für Unterkategorien hat nun einen min-height Puffer, damit leere gut treffbar sind */
 .sub-cat-list { 
     display: flex; flex-direction: column; 
     min-height: 12px; 
@@ -871,7 +873,6 @@ header {
 }
 .cat-content.sub-cat { margin-left: 24px; padding: 10px 14px; }
 
-/* Sortier-Styling */
 .sortable-ghost > .cat-content { 
     opacity: 0.5; 
     background: rgba(234, 179, 8, 0.05); 
@@ -907,7 +908,7 @@ header {
     transition: background 0.2s;
 }
 .toggle-icon:not(.empty):hover { background: var(--surf-light); color: var(--text); }
-.toggle-icon.empty { pointer-events: none; } /* Platzhalter für leere Kategorien */
+.toggle-icon.empty { pointer-events: none; } 
 .toggle-icon svg { width: 14px; height: 14px; transition: transform 0.3s; pointer-events: none; }
 .toggle-icon.rotated svg { transform: rotate(-90deg); }
 
@@ -993,21 +994,6 @@ header {
 
 .card-img-wrap { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; pointer-events: none; background: #111; }
 .card-img-wrap img { width: 100%; height: 100%; object-fit: cover; }
-
-.card-info { 
-    position: absolute; 
-    bottom: 0; left: 0; right: 0;
-    background: linear-gradient(to top, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.4) 70%, transparent 100%); 
-    padding: 24px 12px 12px; 
-    text-align: center; 
-}
-.card-title {
-    font-family: 'Outfit', sans-serif;
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: #fff;
-    text-shadow: 0 2px 4px rgba(0,0,0,0.8);
-}
 
 .badge { 
     position: absolute; 
