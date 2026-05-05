@@ -102,12 +102,13 @@ function renderSidebar() {
   container.innerHTML = '';
   container.appendChild(createCatEl({name: '', parent: null}, 'Alle Karten'));
 
-  const parents = categories.filter(c => !c.parent);
+  const parents = categories.filter(c => !c.parent).sort((a,b) => (a.pos||0) - (b.pos||0));
   parents.forEach(p => {
     const isCollapsed = collapsedCats.has(p.name);
-    container.appendChild(createCatEl(p, p.name, false, true, isCollapsed));
+    const li = createCatEl(p, p.name, false, true, isCollapsed);
+    container.appendChild(li);
     if (!isCollapsed) {
-      categories.filter(c => c.parent === p.name).forEach(s => {
+      categories.filter(c => c.parent === p.name).sort((a,b) => (a.pos||0) - (b.pos||0)).forEach(s => {
         container.appendChild(createCatEl(s, s.name, true));
       });
     }
@@ -121,8 +122,41 @@ function createCatEl(cat, label, isSub = false, hasChildren = false, isCollapsed
   
   const li = document.createElement('li');
   li.className = (activeCat === cat.name ? 'active ' : '') + (isSub ? 'sub-cat' : '');
+
+  // Drag-and-drop für Sortierung (nur echte Kategorien)
+  if (cat.name !== '') {
+    li.draggable = true;
+    li.dataset.catName = cat.name;
+    li.addEventListener('dragstart', e => {
+      e.stopPropagation();
+      e.dataTransfer.setData('cat-drag', cat.name);
+      li.classList.add('cat-dragging');
+    });
+    li.addEventListener('dragend', () => li.classList.remove('cat-dragging'));
+    li.addEventListener('dragover', e => { e.preventDefault(); e.stopPropagation(); li.classList.add('cat-drag-over'); });
+    li.addEventListener('dragleave', () => li.classList.remove('cat-drag-over'));
+    li.addEventListener('drop', async e => {
+      e.preventDefault(); e.stopPropagation();
+      li.classList.remove('cat-drag-over');
+      const draggedName = e.dataTransfer.getData('cat-drag');
+      if (!draggedName || draggedName === cat.name) return;
+      const draggedCat = categories.find(c => c.name === draggedName);
+      const targetCat  = categories.find(c => c.name === cat.name);
+      if (!draggedCat || !targetCat) return;
+      // Tausche pos-Werte
+      const batch = writeBatch(db);
+      batch.update(doc(db, 'categories', draggedName), { pos: targetCat.pos || 0 });
+      batch.update(doc(db, 'categories', cat.name),    { pos: draggedCat.pos || 0 });
+      await batch.commit();
+    });
+  }
+
   let toggle = hasChildren ? `<span class="toggle-icon" onclick="event.stopPropagation(); toggleCatCollapse('${cat.name}')">${isCollapsed ? '▶' : '▼'}</span>` : '';
   
+  let dragHandle = cat.name !== '' ? `<span class="cat-drag-handle" title="Sortieren">⠿</span>` : '';
+
+  let renameBtn = cat.name !== '' ? `<span class="cat-rename" onclick="event.stopPropagation(); renameCategory('${cat.name}')" title="Umbenennen">✏️</span>` : '';
+
   let deleteBtn = '';
   if (cat.name !== '' && total === 0) {
     deleteBtn = `<span class="cat-delete" onclick="event.stopPropagation(); removeCategory('${cat.name}')">×</span>`;
@@ -132,9 +166,11 @@ function createCatEl(cat, label, isSub = false, hasChildren = false, isCollapsed
   
   li.innerHTML = `
     <div class="per-bg" style="width:${pct}%"></div>
+    ${dragHandle}
     ${toggle}
     <span class="cat-label">${label}</span>
     <span class="cat-stats">${owned} / ${total} | ${pct}%</span>
+    ${renameBtn}
     ${deleteBtn}
   `;
   return li;
@@ -150,6 +186,32 @@ window.removeCategory = async (name) => {
   await deleteDoc(doc(db, 'categories', name));
   if (activeCat === name) activeCat = '';
   renderAll();
+};
+
+window.renameCategory = async (oldName) => {
+  const newName = prompt(`Kategorie umbenennen:`, oldName);
+  if (!newName || newName.trim() === '' || newName.trim() === oldName) return;
+  const trimmed = newName.trim();
+  if (categories.find(c => c.name === trimmed)) { alert('Name bereits vorhanden.'); return; }
+
+  const oldCat = categories.find(c => c.name === oldName);
+  const batch = writeBatch(db);
+
+  // Neue Kategorie anlegen
+  batch.set(doc(db, 'categories', trimmed), { ...oldCat, name: trimmed });
+  // Alte löschen
+  batch.delete(doc(db, 'categories', oldName));
+  // Alle Karten mit dieser Kategorie updaten
+  cards.filter(c => c.cat === oldName).forEach(c => {
+    batch.update(doc(db, 'cards', c.id), { cat: trimmed });
+  });
+  // Alle Unterkategorien updaten
+  categories.filter(c => c.parent === oldName).forEach(c => {
+    batch.update(doc(db, 'categories', c.name), { parent: trimmed });
+  });
+
+  await batch.commit();
+  if (activeCat === oldName) activeCat = trimmed;
 };
 
 // ── GRID RENDERING ─────────────────────────────────────────────
@@ -175,7 +237,19 @@ function renderGrid() {
       ${c.status === 'missing' ? '<div class="badge">FEHLT</div>' : ''}
       <div class="card-info">${c.name || ''}</div>
     `;
-    div.ondblclick = () => openEditModal(c);
+    div.ondblclick = () => {
+      if (div._clickTimer) { clearTimeout(div._clickTimer); div._clickTimer = null; }
+      openEditModal(c);
+    };
+    div.onclick = () => {
+      if (div._clickTimer) { clearTimeout(div._clickTimer); div._clickTimer = null; }
+      div._clickTimer = setTimeout(() => {
+        div._clickTimer = null;
+        if (selectedCards.has(c.id)) selectedCards.delete(c.id);
+        else selectedCards.add(c.id);
+        updateBulkUI(); renderGrid();
+      }, 220);
+    };
     div.ondragstart = (e) => { e.dataTransfer.setData('card-id', c.id); div.classList.add('dragging'); };
     div.ondragend = () => div.classList.remove('dragging');
     div.ondragover = (e) => e.preventDefault();
@@ -316,7 +390,7 @@ window.bulkDelete = async () => {
 window.addCategory = async () => {
   const n = document.getElementById('new-cat-name').value.trim();
   const p = document.getElementById('new-cat-parent').value;
-  if (n) await setDoc(doc(db, 'categories', n), { name: n, parent: p || null });
+  if (n) await setDoc(doc(db, 'categories', n), { name: n, parent: p || null, pos: Date.now() });
   document.getElementById('new-cat-name').value = '';
 };
 
@@ -500,7 +574,7 @@ header {
 
 .cat-delete {
     position: absolute;
-    right: 15px;
+    right: 10px;
     top: 50%;
     transform: translateY(-50%);
     color: #ff4d4d;
@@ -512,17 +586,49 @@ header {
 .cat-list li:hover .cat-delete { opacity: 1; }
 .cat-delete:hover { transform: translateY(-50%) scale(1.2); }
 
+.cat-rename {
+    position: absolute;
+    right: 34px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.85rem;
+    opacity: 0;
+    transition: 0.2s;
+    cursor: pointer;
+}
+.cat-list li:hover .cat-rename { opacity: 0.7; }
+.cat-rename:hover { opacity: 1 !important; }
+
+.cat-drag-handle {
+    position: absolute;
+    left: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 1rem;
+    color: var(--gold);
+    opacity: 0;
+    transition: opacity 0.2s;
+    cursor: grab;
+    z-index: 10;
+    line-height: 1;
+}
+.cat-list li:hover .cat-drag-handle { opacity: 0.5; }
+.cat-drag-handle:hover { opacity: 1 !important; }
+
+.cat-dragging { opacity: 0.4; }
+.cat-drag-over { border-color: var(--gold) !important; background: rgba(241,211,130,0.08) !important; }
+
 .sidebar-footer { padding: 20px; border-top: 1px solid var(--border); background: var(--surf); }
 .sidebar-footer input, .sidebar-footer select { 
     width: 100%; margin-bottom: 10px; background: #000; border: 1px solid var(--border); 
     color: white !important; padding: 10px; border-radius: 6px; font-family: inherit;
 }
 
-.toggle-icon { position: absolute; left: 5px; top: 12px; font-size: 0.7rem; color: var(--gold); z-index: 10; }
+.toggle-icon { position: absolute; left: 22px; top: 12px; font-size: 0.7rem; color: var(--gold); z-index: 10; }
 
 .per-bg { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(241, 211, 130, 0.08); z-index: 0; }
 
-.cat-label { position: relative; z-index: 1; font-weight: 600; }
+.cat-label { position: relative; z-index: 1; font-weight: 600; padding-left: 18px; }
 .cat-stats { font-size: 0.75rem; color: var(--gold); opacity: 0.8; position: relative; z-index: 1; font-family: 'Cinzel'; }
 
 .grid-container { flex: 1; padding: 2rem; overflow-y: auto; position: relative; background: #08080a; }
