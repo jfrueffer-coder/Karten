@@ -154,25 +154,77 @@ function createCatEl(cat, label, isSub = false, hasChildren = false, isCollapsed
   if (cat.name !== '') {
     li.draggable = true;
     li.dataset.catName = cat.name;
+    li.dataset.parent = cat.parent || '';
+
     li.addEventListener('dragstart', e => {
       e.stopPropagation();
-      e.dataTransfer.setData('cat-drag', cat.name);
+      e.dataTransfer.setData('cat-drag-name', cat.name);
+      e.dataTransfer.setData('cat-drag-parent', cat.parent || '');
       li.classList.add('cat-dragging');
     });
-    li.addEventListener('dragend', () => li.classList.remove('cat-dragging'));
-    li.addEventListener('dragover', e => { e.preventDefault(); e.stopPropagation(); li.classList.add('cat-drag-over'); });
-    li.addEventListener('dragleave', () => li.classList.remove('cat-drag-over'));
+
+    li.addEventListener('dragend', () => {
+      li.classList.remove('cat-dragging');
+      document.querySelectorAll('.drop-before, .drop-after').forEach(el => {
+          el.classList.remove('drop-before', 'drop-after');
+      });
+    });
+
+    li.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const draggedName = e.dataTransfer.getData('cat-drag-name');
+      const draggedParent = e.dataTransfer.getData('cat-drag-parent');
+      
+      // Nur sortieren, wenn im gleichen Level (Sub zu Sub oder Parent zu Parent)
+      if (draggedParent !== (cat.parent || '')) return;
+
+      const rect = li.getBoundingClientRect();
+      const midpoint = rect.top + rect.height / 2;
+      
+      li.classList.remove('drop-before', 'drop-after');
+      if (e.clientY < midpoint) {
+        li.classList.add('drop-before');
+      } else {
+        li.classList.add('drop-after');
+      }
+    });
+
+    li.addEventListener('dragleave', () => {
+      li.classList.remove('drop-before', 'drop-after');
+    });
+
     li.addEventListener('drop', async e => {
-      e.preventDefault(); e.stopPropagation();
-      li.classList.remove('cat-drag-over');
-      const draggedName = e.dataTransfer.getData('cat-drag');
+      e.preventDefault();
+      e.stopPropagation();
+      
+      const draggedName = e.dataTransfer.getData('cat-drag-name');
+      const draggedParent = e.dataTransfer.getData('cat-drag-parent');
+      const isBefore = li.classList.contains('drop-before');
+      
+      li.classList.remove('drop-before', 'drop-after');
+
       if (!draggedName || draggedName === cat.name) return;
-      const draggedCat = categories.find(c => c.name === draggedName);
-      const targetCat  = categories.find(c => c.name === cat.name);
-      if (!draggedCat || !targetCat) return;
+      if (draggedParent !== (cat.parent || '')) return;
+
+      // Logik: Alle Kategorien der gleichen Ebene holen
+      let siblings = categories
+        .filter(c => (c.parent || '') === draggedParent)
+        .sort((a,b) => (a.pos || 0) - (b.pos || 0));
+      
+      const draggedIdx = siblings.findIndex(c => c.name === draggedName);
+      const draggedObj = siblings.splice(draggedIdx, 1)[0];
+      
+      let targetIdx = siblings.findIndex(c => c.name === cat.name);
+      if (!isBefore) targetIdx++;
+      
+      siblings.splice(targetIdx, 0, draggedObj);
+      
+      // Batch Update der Positionen
       const batch = writeBatch(db);
-      batch.update(doc(db, 'categories', draggedName), { pos: targetCat.pos || 0 });
-      batch.update(doc(db, 'categories', cat.name),    { pos: draggedCat.pos || 0 });
+      siblings.forEach((c, index) => {
+        batch.update(doc(db, 'categories', c.name), { pos: index });
+      });
       await batch.commit();
     });
   }
@@ -314,8 +366,7 @@ async function processImageFile(file) {
 
 window.addEventListener('dragover', e => e.preventDefault());
 window.addEventListener('drop', async e => {
-  // Verhindere Bild-Logik, wenn wir Karten oder Kategorien sortieren
-  if (e.dataTransfer.getData('card-id') || e.dataTransfer.getData('cat-drag')) return;
+  if (e.dataTransfer.getData('card-id') || e.dataTransfer.getData('cat-drag-name')) return;
   if (e.target.closest('#login-screen')) return;
   e.preventDefault();
   
@@ -420,7 +471,14 @@ window.bulkDelete = async () => {
 window.addCategory = async () => {
   const n = document.getElementById('new-cat-name').value.trim();
   const p = document.getElementById('new-cat-parent').value;
-  if (n) await setDoc(doc(db, 'categories', n), { name: n, parent: p || null, pos: Date.now() });
+  if (n) {
+    const siblings = categories.filter(c => (c.parent || '') === (p || ''));
+    await setDoc(doc(db, 'categories', n), { 
+        name: n, 
+        parent: p || null, 
+        pos: siblings.length 
+    });
+  }
   document.getElementById('new-cat-name').value = '';
 };
 
@@ -597,7 +655,12 @@ header {
     display: flex; 
     flex-direction: column;
     gap: 4px;
+    transition: border-color 0.2s, background 0.2s;
 }
+
+/* DRAG INDICATORS */
+.drop-before { border-top: 3px solid var(--gold) !important; }
+.drop-after { border-bottom: 3px solid var(--gold) !important; }
 
 .cat-list li.active { border-color: var(--gold); background: rgba(241, 211, 130, 0.05); }
 .cat-list li.sub-cat { margin-left: 20px; font-size: 0.9rem; }
@@ -612,6 +675,7 @@ header {
     font-weight: bold;
     opacity: 0;
     transition: 0.2s;
+    z-index: 11;
 }
 .cat-list li:hover .cat-delete { opacity: 1; }
 
@@ -624,6 +688,7 @@ header {
     opacity: 0;
     transition: 0.2s;
     cursor: pointer;
+    z-index: 11;
 }
 .cat-list li:hover .cat-rename { opacity: 0.7; }
 
@@ -640,8 +705,7 @@ header {
 }
 .cat-list li:hover .cat-drag-handle { opacity: 0.5; }
 
-.cat-dragging { opacity: 0.4; }
-.cat-drag-over { border-color: var(--gold) !important; background: rgba(241,211,130,0.08) !important; }
+.cat-dragging { opacity: 0.4; background: #222 !important; }
 
 .sidebar-footer { padding: 20px; border-top: 1px solid var(--border); background: var(--surf); }
 .sidebar-footer input, .sidebar-footer select { 
@@ -651,10 +715,10 @@ header {
 
 .toggle-icon { position: absolute; left: 22px; top: 12px; font-size: 0.7rem; color: var(--gold); z-index: 10; }
 
-.per-bg { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(241, 211, 130, 0.08); z-index: 0; }
+.per-bg { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(241, 211, 130, 0.08); z-index: 0; pointer-events: none; }
 
-.cat-label { position: relative; z-index: 1; font-weight: 600; padding-left: 18px; }
-.cat-stats { font-size: 0.75rem; color: var(--gold); opacity: 0.8; position: relative; z-index: 1; font-family: 'Cinzel'; }
+.cat-label { position: relative; z-index: 1; font-weight: 600; padding-left: 18px; pointer-events: none; }
+.cat-stats { font-size: 0.75rem; color: var(--gold); opacity: 0.8; position: relative; z-index: 1; font-family: 'Cinzel'; pointer-events: none; }
 
 .grid-container { flex: 1; padding: 2rem; overflow-y: auto; position: relative; background: #08080a; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 1.5rem; }
