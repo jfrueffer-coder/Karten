@@ -14,11 +14,11 @@ import { getFirestore, collection, doc, setDoc, updateDoc, deleteDoc, onSnapshot
   from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 
 const firebaseConfig = {
-  apiKey:            "AIzaSyD7EPCt5O0_l8rIF8TJJq1UISgfVPncmWQ",
-  authDomain:        "karten-96920.firebaseapp.com",
-  projectId:         "karten-96920",
-  messagingSenderId: "895981550262",
-  appId:             "1:895981550262:web:d69cc1e84ab956ca780417"
+  apiKey:            "%%FIREBASE_API_KEY%%",
+  authDomain:        "%%FIREBASE_AUTH_DOMAIN%%",
+  projectId:         "%%FIREBASE_PROJECT_ID%%",
+  messagingSenderId: "%%FIREBASE_SENDER_ID%%",
+  appId:             "%%FIREBASE_APP_ID%%"
 };
 
 const app  = initializeApp(firebaseConfig);
@@ -73,21 +73,53 @@ window.handleLogin = async (e) => {
 window.logout = () => signOut(auth);
 
 function subscribeData() {
-  onSnapshot(query(collection(db, 'cards'), orderBy('pos', 'asc')), snap => {
-    cards = snap.docs.map(d => ({id:d.id, ...d.data()}));
-    renderAll();
-  });
-  onSnapshot(collection(db, 'categories'), snap => {
-    categories = snap.docs.map(d => d.data());
-    renderAll();
-  });
+  showLoading(true);
+  let cardsReady = false, catsReady = false;
+  const checkReady = () => { if (cardsReady && catsReady) showLoading(false); };
+
+  onSnapshot(
+    query(collection(db, 'cards'), orderBy('pos', 'asc')),
+    snap => {
+      cards = snap.docs.map(d => ({id:d.id, ...d.data()}));
+      cardsReady = true; checkReady(); renderAll();
+    },
+    err => {
+      console.error('Cards snapshot error:', err);
+      showLoading(false);
+      // Fallback ohne orderBy falls kein Index existiert
+      onSnapshot(collection(db, 'cards'), snap => {
+        cards = snap.docs.map(d => ({id:d.id, ...d.data()}));
+        cardsReady = true; checkReady(); renderAll();
+      });
+    }
+  );
+
+  onSnapshot(
+    collection(db, 'categories'),
+    snap => {
+      categories = snap.docs.map(d => d.data());
+      catsReady = true; checkReady(); renderAll();
+    },
+    err => { console.error('Categories snapshot error:', err); showLoading(false); }
+  );
 }
 
+function showLoading(on) {
+  let el = document.getElementById('loading-overlay');
+  if (!el) return;
+  el.style.display = on ? 'flex' : 'none';
+}
+
+let _renderTimer = null;
 function renderAll() {
-  renderSidebar();
-  renderGrid();
-  updateStats();
-  renderCatDropdowns();
+  if (_renderTimer) clearTimeout(_renderTimer);
+  _renderTimer = setTimeout(() => {
+    _renderTimer = null;
+    renderSidebar();
+    renderGrid();
+    updateStats();
+    renderCatDropdowns();
+  }, 40);
 }
 
 function updateStats() {
@@ -233,7 +265,9 @@ function renderGrid() {
     div.dataset.id = c.id;
     div.draggable = true;
     div.innerHTML = `
-      <div class="card-img-wrap">${c.image ? `<img src="${c.image}" loading="lazy" decoding="async">` : '<span>🃏</span>'}</div>
+      <div class="card-img-wrap">${c.image
+        ? `<img data-src="${c.image}" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E" loading="lazy" decoding="async" class="lazy-img">`
+        : '<span>🃏</span>'}</div>
       ${c.status === 'missing' ? '<div class="badge">FEHLT</div>' : ''}
       <div class="card-info">${c.name || ''}</div>
     `;
@@ -256,6 +290,23 @@ function renderGrid() {
     div.ondrop = (e) => handleSortDrop(e, c.id);
     grid.appendChild(div);
   });
+  initLazyImages();
+}
+
+function initLazyImages() {
+  const imgs = document.querySelectorAll('img.lazy-img');
+  if (!imgs.length) return;
+  const observer = new IntersectionObserver((entries, obs) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const img = entry.target;
+        img.src = img.dataset.src;
+        img.classList.remove('lazy-img');
+        obs.unobserve(img);
+      }
+    });
+  }, { rootMargin: '100px' });
+  imgs.forEach(img => observer.observe(img));
 }
 
 window.toggleMissingFilter = () => {
@@ -276,7 +327,7 @@ function processImageFile(file) {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX = 500;
+        const MAX = 400;
         let w = img.width, h = img.height;
         if (w > MAX || h > MAX) {
           if (w > h) { h *= MAX / w; w = MAX; }
@@ -285,7 +336,7 @@ function processImageFile(file) {
         canvas.width = w; canvas.height = h;
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL('image/webp', 0.8));
+        resolve(canvas.toDataURL('image/webp', 0.65));
       };
       img.src = ev.target.result;
     };
@@ -741,6 +792,13 @@ header {
 </div>
 
 <div id="selection-box"></div>
+
+<div id="loading-overlay" style="display:none;position:fixed;inset:0;background:rgba(10,10,12,0.85);z-index:8000;align-items:center;justify-content:center;flex-direction:column;gap:1rem;font-family:'Cinzel';color:#f1d382;font-size:0.9rem;letter-spacing:0.1em;">
+  <div style="width:40px;height:40px;border:3px solid #333;border-top-color:#f1d382;border-radius:50%;animation:spin 0.8s linear infinite;"></div>
+  LADEN…
+</div>
+
+<style>@keyframes spin{to{transform:rotate(360deg)}}</style>
 
 <div id="bulk-bar">
     <span id="bulk-count">0 markiert</span>
