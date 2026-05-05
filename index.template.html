@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Collector Ultimate – Final Edition</title>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=Crimson+Pro:wght@300;400;600&display=swap" rel="stylesheet">
+<!-- SortableJS für perfektes, ruckelfreies Drag & Drop (auch für verschachtelte Listen) -->
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
@@ -26,12 +28,16 @@ const auth = getAuth(app);
 const db   = getFirestore(app);
 
 // ── STATE ──────────────────────────────────────────────────────
-let cards = [], categories = [];
+let cards = [], categories =[];
 let activeCat = '', editingId = null;
 let selectedCards = new Set();
 let isSelecting = false, startX = 0, startY = 0;
 let collapsedCats = new Set();
 let showOnlyMissing = false;
+
+// SortableJS Instanzen und Drag-State
+window.sortableInstances =[];
+window.isDraggingCategory = false;
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 
@@ -52,27 +58,9 @@ onAuthStateChanged(auth, async user => {
   }
 });
 
-window.handleLogin = async (e) => {
-  e.preventDefault();
-  const user = document.getElementById('login-user').value.trim();
-  const pass = document.getElementById('login-pass').value;
-  const errorEl = document.getElementById('login-error');
-  
-  // Da Firebase E-Mail benötigt, mappen wir den User "Florian" intern
-  if (user.toLowerCase() === "florian") {
-    try {
-      await signInWithEmailAndPassword(auth, "florian@collector.de", pass);
-    } catch (err) {
-      errorEl.textContent = "Passwort falsch.";
-    }
-  } else {
-    errorEl.textContent = "Benutzer nicht gefunden.";
-  }
-};
-
 window.logout = () => signOut(auth);
 
-// Alle Funktionen die von HTML-Inline-Handlern aufgerufen werden auf window setzen
+// Alle Funktionen die von HTML-Inline-Handlern aufgerufen werden
 window.renderGrid         = () => renderGrid();
 window.toggleMissingFilter = () => _toggleMissingFilter();
 window.setCols            = (c) => _setCols(c);
@@ -85,7 +73,6 @@ window.bulkStatus         = (s) => _bulkStatus(s);
 window.bulkDelete         = () => _bulkDelete();
 window.openEditModal      = (c) => _openEditModal(c);
 
-// Login per addEventListener (robuster als onsubmit="" im HTML)
 document.addEventListener('DOMContentLoaded', () => {
   const form = document.getElementById('login-form');
   if (form) form.addEventListener('submit', async (e) => {
@@ -101,15 +88,7 @@ document.addEventListener('DOMContentLoaded', () => {
       try {
         await signInWithEmailAndPassword(auth, 'florian@collector.de', passVal);
       } catch (err) {
-        const code = err.code || '';
-        if (code.includes('wrong-password') || code.includes('invalid-credential') || code.includes('invalid-login'))
-          errorEl.textContent = 'Passwort falsch.';
-        else if (code.includes('user-not-found'))
-          errorEl.textContent = 'Benutzer nicht gefunden.';
-        else if (code.includes('network'))
-          errorEl.textContent = 'Netzwerkfehler. Bitte erneut versuchen.';
-        else
-          errorEl.textContent = 'Fehler: ' + (err.message || code);
+        errorEl.textContent = 'Passwort falsch.';
       }
     } else {
       errorEl.textContent = 'Benutzer nicht gefunden.';
@@ -117,6 +96,23 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.disabled = false; btn.textContent = 'EINLOGGEN';
   });
 });
+
+window.handleLogin = async (e) => {
+  e.preventDefault();
+  const user = document.getElementById('login-user').value.trim();
+  const pass = document.getElementById('login-pass').value;
+  const errorEl = document.getElementById('login-error');
+  
+  if (user.toLowerCase() === "florian") {
+    try {
+      await signInWithEmailAndPassword(auth, "florian@collector.de", pass);
+    } catch (err) {
+      errorEl.textContent = "Passwort falsch.";
+    }
+  } else {
+    errorEl.textContent = "Benutzer nicht gefunden.";
+  }
+};
 
 function subscribeData() {
   showLoading(true);
@@ -132,7 +128,6 @@ function subscribeData() {
     err => {
       console.error('Cards snapshot error:', err);
       showLoading(false);
-      // Fallback ohne orderBy falls kein Index existiert
       onSnapshot(collection(db, 'cards'), snap => {
         cards = snap.docs.map(d => ({id:d.id, ...d.data()}));
         cardsReady = true; checkReady(); renderAll();
@@ -174,121 +169,147 @@ function updateStats() {
   document.getElementById('stat-have').textContent = have;
 }
 
-// ── SIDEBAR ───────────────────────────────────────────────────
+// ── NEUE SIDEBAR MIT SORTABLE.JS ──────────────────────────────
 function renderSidebar() {
+  // Verhindert, dass Firebase die Liste neu zeichnet, während man gerade etwas zieht
+  if (window.isDraggingCategory) return; 
+
+  // Alte Sortable-Instanzen zerstören um Memory-Leaks zu vermeiden
+  window.sortableInstances.forEach(s => s.destroy());
+  window.sortableInstances =[];
+
   const container = document.getElementById('cat-list');
   container.innerHTML = '';
-  container.appendChild(createCatEl({name: '', parent: null}, 'Alle Karten'));
+
+  // "Alle Karten" Container (Nicht sortierbar)
+  const allCardsWrapper = document.createElement('div');
+  const allRel = cards;
+  const allOwned = allRel.filter(c => c.status !== 'missing').length;
+  const allPct = allRel.length > 0 ? Math.round((allOwned / allRel.length) * 100) : 0;
+  
+  const allContent = document.createElement('div');
+  allContent.className = 'cat-content ' + (activeCat === '' ? 'active' : '');
+  allContent.innerHTML = `
+    <div class="per-bg" style="width:${allPct}%"></div>
+    <span class="cat-label" style="padding-left:10px;">Alle Karten</span>
+    <span class="cat-stats">${allOwned} / ${allRel.length} | ${allPct}%</span>
+  `;
+  allContent.onclick = () => { activeCat = ''; renderGrid(); renderSidebar(); };
+  allCardsWrapper.appendChild(allContent);
+  container.appendChild(allCardsWrapper);
+
+  // Hauptkategorien-Container
+  const mainContainer = document.createElement('div');
+  mainContainer.id = 'main-cats-container';
+  container.appendChild(mainContainer);
 
   const parents = categories.filter(c => !c.parent).sort((a,b) => (a.pos||0) - (b.pos||0));
   parents.forEach(p => {
     const isCollapsed = collapsedCats.has(p.name);
-    const li = createCatEl(p, p.name, false, true, isCollapsed);
-    container.appendChild(li);
-    if (!isCollapsed) {
-      categories.filter(c => c.parent === p.name).sort((a,b) => (a.pos||0) - (b.pos||0)).forEach(s => {
-        container.appendChild(createCatEl(s, s.name, true));
+    mainContainer.appendChild(createCatWrapper(p, false, isCollapsed));
+  });
+
+  // Sortable.js für Hauptkategorien aktivieren
+  window.sortableInstances.push(new Sortable(mainContainer, {
+    group: 'mainCats', // Hauptkategorien können nur mit Hauptkategorien getauscht werden
+    handle: '.cat-drag-handle',
+    animation: 200,
+    ghostClass: 'sortable-ghost',
+    dragClass: 'sortable-drag',
+    onStart: () => { window.isDraggingCategory = true; },
+    onEnd: async (evt) => {
+      const items = Array.from(mainContainer.children);
+      const batch = writeBatch(db);
+      items.forEach((el, index) => {
+        batch.update(doc(db, 'categories', el.dataset.catName), { pos: (index + 1) * 1000 });
       });
+      await batch.commit();
+      window.isDraggingCategory = false;
     }
+  }));
+
+  // Sortable.js für Unterkategorien aktivieren
+  document.querySelectorAll('.sub-cat-list').forEach(subList => {
+    window.sortableInstances.push(new Sortable(subList, {
+      group: 'subCats', // Erlaubt das Verschieben von Unterkategorien, sogar in ANDERE Hauptkategorien!
+      handle: '.cat-drag-handle',
+      animation: 200,
+      ghostClass: 'sortable-ghost',
+      dragClass: 'sortable-drag',
+      onStart: () => { window.isDraggingCategory = true; },
+      onEnd: async (evt) => {
+        const newParent = evt.to.dataset.parent; // Die Hauptkategorie, in der fallengelassen wurde
+        const items = Array.from(evt.to.children);
+        const batch = writeBatch(db);
+        items.forEach((el, index) => {
+          batch.update(doc(db, 'categories', el.dataset.catName), { 
+            pos: (index + 1) * 1000,
+            parent: newParent // Falls die Sub-Kategorie in eine neue Main-Kategorie verschoben wurde
+          });
+        });
+        await batch.commit();
+        window.isDraggingCategory = false;
+      }
+    }));
   });
 }
 
-function createCatEl(cat, label, isSub = false, hasChildren = false, isCollapsed = false) {
-  const rel = cat.name === '' ? cards : cards.filter(c => c.cat === cat.name || (categories.find(x=>x.name===c.cat)?.parent === cat.name));
-  const total = rel.length, owned = rel.filter(c => c.status !== 'missing').length;
+function createCatWrapper(cat, isSub = false, isCollapsed = false) {
+  const rel = cards.filter(c => c.cat === cat.name || (!isSub && categories.find(x=>x.name===c.cat)?.parent === cat.name));
+  const total = rel.length;
+  const owned = rel.filter(c => c.status !== 'missing').length;
   const pct = total > 0 ? Math.round((owned / total) * 100) : 0;
   
-  const li = document.createElement('li');
-  li.className = (activeCat === cat.name ? 'active ' : '') + (isSub ? 'sub-cat' : '');
+  const wrapper = document.createElement('div');
+  wrapper.className = 'cat-wrapper';
+  wrapper.dataset.catName = cat.name;
 
-  // Drag-and-drop für Sortierung (nur echte Kategorien)
-  if (cat.name !== '') {
-    li.draggable = true;
-    li.dataset.catName = cat.name;
+  const content = document.createElement('div');
+  content.className = 'cat-content ' + (activeCat === cat.name ? 'active ' : '') + (isSub ? 'sub-cat' : '');
 
-    li.addEventListener('dragstart', e => {
-      e.stopPropagation();
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('cat-drag', cat.name);
-      setTimeout(() => li.classList.add('cat-dragging'), 0);
-    });
-    li.addEventListener('dragend', () => {
-      li.classList.remove('cat-dragging');
-      document.querySelectorAll('.cat-drag-over').forEach(el => el.classList.remove('cat-drag-over'));
-    });
-    li.addEventListener('dragover', e => {
-      // Nur akzeptieren wenn es ein cat-drag ist (nicht card-drag)
-      if (!e.dataTransfer.types.includes('text/plain') && !e.dataTransfer.types.includes('Files')) {
-        e.preventDefault(); e.stopPropagation();
-        li.classList.add('cat-drag-over');
-      } else {
-        e.preventDefault(); e.stopPropagation();
-        li.classList.add('cat-drag-over');
-      }
-    });
-    li.addEventListener('dragleave', e => {
-      if (!li.contains(e.relatedTarget)) li.classList.remove('cat-drag-over');
-    });
-    li.addEventListener('drop', async e => {
-      e.preventDefault(); e.stopPropagation();
-      li.classList.remove('cat-drag-over');
-
-      const draggedName = e.dataTransfer.getData('cat-drag');
-      if (!draggedName || draggedName === cat.name) return;
-
-      const draggedCat = categories.find(c => c.name === draggedName);
-      const targetCat  = categories.find(c => c.name === cat.name);
-      if (!draggedCat || !targetCat) return;
-
-      // Pos-Werte für alle Kategorien des gleichen Levels sicherstellen
-      const sameLevel = categories
-        .filter(c => (c.parent || null) === (draggedCat.parent || null))
-        .sort((a, b) => (a.pos ?? 0) - (b.pos ?? 0));
-
-      // Fehlende pos-Werte basierend auf aktuellem Index zuweisen
-      const batch = writeBatch(db);
-      sameLevel.forEach((c, i) => {
-        if (c.pos == null) batch.update(doc(db, 'categories', c.name), { pos: (i + 1) * 1000 });
-      });
-
-      // Positionen tauschen
-      const draggedPos = draggedCat.pos ?? (sameLevel.findIndex(c => c.name === draggedName) + 1) * 1000;
-      const targetPos  = targetCat.pos  ?? (sameLevel.findIndex(c => c.name === cat.name)    + 1) * 1000;
-      batch.update(doc(db, 'categories', draggedName), { pos: targetPos  });
-      batch.update(doc(db, 'categories', cat.name),    { pos: draggedPos });
-      await batch.commit();
-    });
-  }
+  const children = categories.filter(c => c.parent === cat.name).sort((a,b) => (a.pos||0) - (b.pos||0));
+  const hasChildren = children.length > 0;
 
   let toggle = hasChildren ? `<span class="toggle-icon" onclick="event.stopPropagation(); toggleCatCollapse('${cat.name}')">${isCollapsed ? '▶' : '▼'}</span>` : '';
-  
-  let dragHandle = cat.name !== '' ? `<span class="cat-drag-handle" title="Sortieren">⠿</span>` : '';
+  let dragHandle = `<span class="cat-drag-handle" title="Sortieren">⠿</span>`;
+  let renameBtn = `<span class="cat-rename" onclick="event.stopPropagation(); renameCategory('${cat.name}')" title="Umbenennen">✏️</span>`;
+  let deleteBtn = total === 0 && !hasChildren ? `<span class="cat-delete" onclick="event.stopPropagation(); removeCategory('${cat.name}')">×</span>` : '';
 
-  let renameBtn = cat.name !== '' ? `<span class="cat-rename" onclick="event.stopPropagation(); renameCategory('${cat.name}')" title="Umbenennen">✏️</span>` : '';
-
-  let deleteBtn = '';
-  if (cat.name !== '' && total === 0) {
-    deleteBtn = `<span class="cat-delete" onclick="event.stopPropagation(); removeCategory('${cat.name}')">×</span>`;
-  }
-
-  li.onclick = () => { activeCat = cat.name; renderGrid(); renderSidebar(); };
-  
-  li.innerHTML = `
+  content.innerHTML = `
     <div class="per-bg" style="width:${pct}%"></div>
     ${dragHandle}
     ${toggle}
-    <span class="cat-label">${label}</span>
+    <span class="cat-label">${cat.name}</span>
     <span class="cat-stats">${owned} / ${total} | ${pct}%</span>
     ${renameBtn}
     ${deleteBtn}
   `;
-  return li;
-}
 
-window.toggleCatCollapse = (name) => {
-  collapsedCats.has(name) ? collapsedCats.delete(name) : collapsedCats.add(name);
-  renderSidebar();
-};
+  content.onclick = (e) => {
+    // Verhindere Klick, wenn auf Buttons gedrückt wurde
+    if (e.target.closest('.cat-drag-handle, .cat-delete, .cat-rename, .toggle-icon')) return;
+    activeCat = cat.name; 
+    renderGrid(); 
+    renderSidebar();
+  };
+
+  wrapper.appendChild(content);
+
+  // Wenn es eine Hauptkategorie ist, bereite den Container für Unterkategorien vor
+  if (!isSub) {
+    const subList = document.createElement('div');
+    subList.className = 'sub-cat-list';
+    subList.dataset.parent = cat.name;
+    if (isCollapsed) subList.style.display = 'none';
+
+    children.forEach(sub => {
+      subList.appendChild(createCatWrapper(sub, true, false));
+    });
+    wrapper.appendChild(subList);
+  }
+
+  return wrapper;
+}
 
 async function _removeCategory(name) {
   if (!confirm(`Kategorie "${name}" wirklich löschen?`)) return;
@@ -383,7 +404,7 @@ function _toggleMissingFilter() {
   renderGrid();
 }
 
-// ── DRAG & DROP LOGIK ─────────────────────────────────────────
+// ── DRAG & DROP LOGIK (Karten & Upload) ───────────────────────
 window.addEventListener('dragover', e => e.preventDefault());
 
 function processImageFile(file) {
@@ -413,13 +434,12 @@ function processImageFile(file) {
 window.addEventListener('drop', async e => {
   if (e.target.closest('#login-screen')) return;
   if (e.dataTransfer.getData('card-id')) return;
-  if (e.dataTransfer.getData('cat-drag')) return; // Kategorie-Drag ignorieren
-  if (e.target.closest('.cat-list')) return;       // Drop in Sidebar ignorieren
+  if (e.target.closest('.cat-list')) return; // Drop in Sidebar ignorieren
   e.preventDefault();
   
   const files = Array.from(e.dataTransfer.files);
   const html = e.dataTransfer.getData('text/html');
-  let newUrls = [];
+  let newUrls =[];
 
   if (files.length > 0) {
     for (let file of files) {
@@ -672,11 +692,14 @@ header {
     flex-direction: column; 
 }
 
-.cat-list { flex: 1; overflow-y: auto; padding: 15px; list-style: none; }
+/* NEUES KATEGORIE-DESIGN FÜR SORTABLE.JS */
+.cat-list { flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 6px; }
 
-.cat-list li { 
+.cat-wrapper { display: flex; flex-direction: column; }
+.sub-cat-list { display: flex; flex-direction: column; min-height: 5px; /* Drop-Target für leere Listen */ }
+
+.cat-content { 
     padding: 10px 15px; 
-    margin-bottom: 6px; 
     border: 1px solid var(--border); 
     border-radius: 8px; 
     cursor: pointer; 
@@ -685,11 +708,25 @@ header {
     display: flex; 
     flex-direction: column;
     gap: 4px;
-    transition: border-color 0.3s;
+    transition: border-color 0.3s, background-color 0.3s;
+    margin-bottom: 6px;
 }
 
-.cat-list li.active { border-color: var(--gold); background: rgba(241, 211, 130, 0.05); }
-.cat-list li.sub-cat { margin-left: 20px; font-size: 0.9rem; }
+.cat-content.active { border-color: var(--gold); background: rgba(241, 211, 130, 0.05); }
+.cat-content.sub-cat { margin-left: 20px; font-size: 0.9rem; }
+
+/* Sortier-Styling (Premium Look während des Ziehens) */
+.sortable-ghost .cat-content { 
+    opacity: 0.4; 
+    background: rgba(241, 211, 130, 0.1); 
+    border-style: dashed; 
+    border-color: var(--gold); 
+}
+.sortable-drag .cat-content { 
+    cursor: grabbing !important; 
+    box-shadow: 0 10px 20px rgba(0,0,0,0.8); 
+    border-color: var(--gold);
+}
 
 .cat-delete {
     position: absolute;
@@ -702,7 +739,7 @@ header {
     opacity: 0;
     transition: 0.2s;
 }
-.cat-list li:hover .cat-delete { opacity: 1; }
+.cat-content:hover .cat-delete { opacity: 1; }
 .cat-delete:hover { transform: translateY(-50%) scale(1.2); }
 
 .cat-rename {
@@ -715,7 +752,7 @@ header {
     transition: 0.2s;
     cursor: pointer;
 }
-.cat-list li:hover .cat-rename { opacity: 0.7; }
+.cat-content:hover .cat-rename { opacity: 0.7; }
 .cat-rename:hover { opacity: 1 !important; }
 
 .cat-drag-handle {
@@ -731,11 +768,9 @@ header {
     z-index: 10;
     line-height: 1;
 }
-.cat-list li:hover .cat-drag-handle { opacity: 0.5; }
+.cat-content:hover .cat-drag-handle { opacity: 0.5; }
 .cat-drag-handle:hover { opacity: 1 !important; }
-
-.cat-dragging { opacity: 0.4; }
-.cat-drag-over { border-color: var(--gold) !important; background: rgba(241,211,130,0.08) !important; }
+.cat-drag-handle:active { cursor: grabbing; }
 
 .sidebar-footer { padding: 20px; border-top: 1px solid var(--border); background: var(--surf); }
 .sidebar-footer input, .sidebar-footer select { 
@@ -743,12 +778,12 @@ header {
     color: white !important; padding: 10px; border-radius: 6px; font-family: inherit;
 }
 
-.toggle-icon { position: absolute; left: 22px; top: 12px; font-size: 0.7rem; color: var(--gold); z-index: 10; }
+.toggle-icon { position: absolute; left: 22px; top: 12px; font-size: 0.7rem; color: var(--gold); z-index: 10; cursor: pointer; }
 
-.per-bg { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(241, 211, 130, 0.08); z-index: 0; }
+.per-bg { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(241, 211, 130, 0.08); z-index: 0; pointer-events: none; }
 
-.cat-label { position: relative; z-index: 1; font-weight: 600; padding-left: 18px; }
-.cat-stats { font-size: 0.75rem; color: var(--gold); opacity: 0.8; position: relative; z-index: 1; font-family: 'Cinzel'; }
+.cat-label { position: relative; z-index: 1; font-weight: 600; padding-left: 18px; pointer-events: none; }
+.cat-stats { font-size: 0.75rem; color: var(--gold); opacity: 0.8; position: relative; z-index: 1; font-family: 'Cinzel'; pointer-events: none; }
 
 .grid-container { flex: 1; padding: 2rem; overflow-y: auto; position: relative; background: #08080a; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 1.5rem; }
@@ -850,12 +885,12 @@ header {
 
 <!-- LOGIN SCREEN -->
 <div id="login-screen">
-    <form class="login-card" onsubmit="handleLogin(event)">
+    <form class="login-card" id="login-form">
         <h1>Collector Login</h1>
         <input type="text" id="login-user" placeholder="Benutzername" required>
         <input type="password" id="login-pass" placeholder="Passwort" required>
         <div id="login-error"></div>
-        <button type="submit" class="btn-gold" style="width:100%">EINLOGGEN</button>
+        <button type="submit" id="login-btn" class="btn-gold" style="width:100%">EINLOGGEN</button>
     </form>
 </div>
 
@@ -905,7 +940,8 @@ header {
 
   <div class="main">
     <aside class="sidebar">
-        <ul class="cat-list" id="cat-list"></ul>
+        <!-- NEUER KATEGORIE CONTAINER -->
+        <div class="cat-list" id="cat-list"></div>
         <div class="sidebar-footer">
             <input type="text" id="new-cat-name" placeholder="Neue Kategorie Name...">
             <select id="new-cat-parent"></select>
